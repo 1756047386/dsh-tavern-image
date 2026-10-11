@@ -62,7 +62,7 @@
   .setting > .label .why { font-size: 12px; color: var(--dim); margin-top: 2px; }
   .setting > .control { flex: 1; min-width: 0; }
 
-  input[type=text], input[type=number], textarea, select {
+  input[type=text], input[type=password], input[type=number], textarea, select {
     background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; width: 100%; }
   textarea { resize: vertical; min-height: 60px; line-height: 1.6; }
@@ -250,6 +250,23 @@
         <div class="control"><input type="text" id="cfgComfyUrl"></div>
       </div>
       <div class="setting">
+        <div class="label"><div class="name">ComfyUI 鉴权</div><div class="why">凭据保存在本机；状态只显示是否已保存</div></div>
+        <div class="control">
+          <select id="cfgComfyAuthMode"><option value="none">无需鉴权</option><option value="bearer">Bearer Token</option><option value="basic">Basic 用户名 / 密码</option></select>
+          <div id="cfgComfyBearerFields" style="margin-top:8px">
+            <input type="password" id="cfgComfyAuthToken" autocomplete="new-password" placeholder="Token">
+            <div class="muted" id="cfgComfyTokenSaved" style="margin-top:4px"></div>
+            <button type="button" id="btnClearComfyToken" style="margin-top:6px">清除已保存 Token</button>
+          </div>
+          <div id="cfgComfyBasicFields" style="margin-top:8px">
+            <input type="text" id="cfgComfyAuthUser" autocomplete="username" placeholder="用户名">
+            <input type="password" id="cfgComfyAuthPass" autocomplete="new-password" placeholder="密码" style="margin-top:6px">
+            <div class="muted" id="cfgComfyPassSaved" style="margin-top:4px"></div>
+            <button type="button" id="btnClearComfyPass" style="margin-top:6px">清除已保存密码</button>
+          </div>
+        </div>
+      </div>
+      <div class="setting">
         <div class="label"><div class="name">画师串 / 风格</div><div class="why">每张图都会带上这串词。原来插件的「自定义画师串」就是它</div></div>
         <div class="control"><textarea id="cfgStyleArtists" placeholder="masterpiece, best quality, (@hero neisan:1.1)"></textarea></div>
       </div>
@@ -289,7 +306,7 @@
         <div class="control"><textarea id="cfgPlannerExtra" placeholder="例如：这次只用第一人称视角；不要出现男性角色"></textarea></div>
       </div>
       <div class="setting">
-        <div class="label"><div class="name">世界书规则</div><div class="why">勾选哪些条目进规划提示词。不勾 = 用默认的任务规则区（前 20 条 + 思考模式）</div></div>
+        <div class="label"><div class="name">规划可用的世界书规则</div><div class="why">控制本控制台规划时可用的条目；单条常驻/关键词触发和适用渠道请到主界面的「世界书」编辑。未选择时使用默认规则区。</div></div>
         <div class="control">
           <div class="row" style="margin-bottom:6px">
             <button class="sm" id="wbDefault">默认规则区</button>
@@ -298,7 +315,7 @@
             <span class="muted" id="wbCount"></span>
           </div>
           <details>
-            <summary class="muted" style="cursor:pointer">展开世界书条目（<span id="wbTotal">0</span> 条）</summary>
+            <summary class="muted" style="cursor:pointer">展开世界书条目（<span id="wbTotal">0</span> 条；触发设置请在主界面编辑）</summary>
             <div id="wbList" style="max-height:320px;overflow:auto;margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px"></div>
           </details>
         </div>
@@ -370,6 +387,7 @@
 
 <script>
 const $ = (sel) => document.querySelector(sel)
+const comfySecretDrafts = { token: '', pass: '' }
 const text = (tag, className, value) => {
   const el = document.createElement(tag)
   if (className) el.className = className
@@ -536,8 +554,16 @@ async function saveWorkflow(id, patch) {
 }
 
 async function saveConfig(patch) {
-  try { applyState((await api('/plugins/dsh-tavern-image/config', { config: patch })).state); toast('已保存') }
+  try {
+    applyState((await api('/plugins/dsh-tavern-image/config', { config: patch })).state)
+    if (Object.hasOwn(patch, 'comfyAuthToken') || patch.clearComfyAuthToken === true) comfySecretDrafts.token = ''
+    if (Object.hasOwn(patch, 'comfyAuthPass') || patch.clearComfyAuthPass === true) comfySecretDrafts.pass = ''
+    renderSettings()
+    toast('已保存')
+    return true
+  }
   catch (error) { toast(error.message, true) }
+  return false
 }
 
 // ================= 人物形象 =================
@@ -649,6 +675,18 @@ async function refreshJobs() {
 // ================= 高级设置 =================
 function renderSettings() {
   $('#cfgComfyUrl').value = state.config.comfyUrl || ''
+  $('#cfgComfyAuthMode').value = state.config.comfyAuthMode || 'none'
+  $('#cfgComfyBearerFields').hidden = $('#cfgComfyAuthMode').value !== 'bearer'
+  $('#cfgComfyBasicFields').hidden = $('#cfgComfyAuthMode').value !== 'basic'
+  $('#cfgComfyAuthToken').value = comfySecretDrafts.token
+  $('#cfgComfyAuthToken').placeholder = state.config.comfyHasAuthToken ? '已保存，留空保留原 Token' : '输入 Token'
+  $('#cfgComfyTokenSaved').textContent = state.config.comfyHasAuthToken ? 'Token 已保存；空输入会保留现有值。' : '尚未保存 Token。'
+  $('#btnClearComfyToken').hidden = !state.config.comfyHasAuthToken
+  $('#cfgComfyAuthUser').value = state.config.comfyAuthUser || ''
+  $('#cfgComfyAuthPass').value = comfySecretDrafts.pass
+  $('#cfgComfyAuthPass').placeholder = state.config.comfyHasAuthPass ? '已保存，留空保留原密码' : '输入密码'
+  $('#cfgComfyPassSaved').textContent = state.config.comfyHasAuthPass ? '密码已保存；空输入会保留现有值。' : '尚未保存密码。'
+  $('#btnClearComfyPass').hidden = !state.config.comfyHasAuthPass
   $('#cfgStyleArtists').value = state.config.styleArtists || ''
   $('#cfgPlannerEnabled').checked = state.config.plannerEnabled !== false
   $('#cfgPlannerProvider').value = state.config.plannerProvider || ''
@@ -783,7 +821,8 @@ $('#wbNone').addEventListener('click', () => { state.config.plannerEntries = [];
 $('#autoGen').addEventListener('change', event => saveConfig({ autoImageGen: event.target.checked }))
 $('#genCount').addEventListener('change', event => saveConfig({ imageGenCount: Number(event.target.value) || 2 }))
 $('#cfgPlannerEnabled').addEventListener('change', event => saveConfig({ plannerEnabled: event.target.checked }))
-$('#btnSaveConfig').addEventListener('click', () => saveConfig({
+$('#btnSaveConfig').addEventListener('click', () => {
+  const patch = {
   plannerEnabled: $('#cfgPlannerEnabled').checked,
   plannerProvider: $('#cfgPlannerProvider').value.trim(),
   plannerModel: $('#cfgPlannerModel').value.trim(),
@@ -792,6 +831,8 @@ $('#btnSaveConfig').addEventListener('click', () => saveConfig({
   plannerExtra: $('#cfgPlannerExtra').value,
   plannerEntries: state.worldbookTouched || plannerEntries().length ? plannerEntries() : defaultEntries(),
   comfyUrl: $('#cfgComfyUrl').value.trim(),
+  comfyAuthMode: $('#cfgComfyAuthMode').value,
+  comfyAuthUser: $('#cfgComfyAuthUser').value,
   styleArtists: $('#cfgStyleArtists').value,
   imageSize: $('#cfgImageSize').value,
   artistPosition: $('#cfgArtistPosition').value,
@@ -801,7 +842,20 @@ $('#btnSaveConfig').addEventListener('click', () => saveConfig({
   overrideSteps: $('#cfgOverrideSteps').checked,
   lockWorkflow: $('#lockWorkflow').checked,
   sizes: state.sizes,
-}))
+  }
+  if (comfySecretDrafts.token) patch.comfyAuthToken = comfySecretDrafts.token
+  if (comfySecretDrafts.pass) patch.comfyAuthPass = comfySecretDrafts.pass
+  return saveConfig(patch)
+})
+
+$('#cfgComfyAuthMode').addEventListener('change', event => {
+  $('#cfgComfyBearerFields').hidden = event.target.value !== 'bearer'
+  $('#cfgComfyBasicFields').hidden = event.target.value !== 'basic'
+})
+$('#cfgComfyAuthToken').addEventListener('input', event => { comfySecretDrafts.token = event.target.value })
+$('#cfgComfyAuthPass').addEventListener('input', event => { comfySecretDrafts.pass = event.target.value })
+$('#btnClearComfyToken').addEventListener('click', () => saveConfig({ clearComfyAuthToken: true }))
+$('#btnClearComfyPass').addEventListener('click', () => saveConfig({ clearComfyAuthPass: true }))
 
 $('#btnTest').addEventListener('click', async () => {
   const button = $('#btnTest')

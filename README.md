@@ -4,35 +4,15 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
-## 2.1.0 更新
+2.5.0 已把这批体验改进随仓库发布：逐张提交、世界书按需注入、单张任务操作和安装器。全新安装与旧版升级都看下方「安装与第一次出图」。
 
-仓库、插件 ID 和主接口前缀统一为 `dsh-tavern-image`，旧接口保留兼容。旧版安装需要迁移目录，步骤见下。
+## 2.5.0 更新
 
-<details>
-<summary>已有 dsh-tavern-comfy 安装：更新与目录迁移</summary>
+- **安装器不再把人卡死**：注册失败时会自动回滚，不再把半成品目录留在 `data/tools` 下（留着会让下次安装被「目标目录已存在」挡住）；检测到指向已删除目录的失效登记时会放行重装；目标目录已存在时会给出可复制的处理命令；顺手清理残留的暂存目录。
+- **正文插图不再挂一排按钮**：出图后图下方保持干净，左键看大图、右键或长按打开提示词编辑器（改提示词、换渠道、重画都在里面）；生成中、失败、状态待确认时仍保留对应按钮。
+- **世界书支持按需注入**：每条规则可选常驻或关键词触发，并限定生效渠道；规划页可以看到本轮纳入了哪些规则、排除了哪些及原因。
 
-插件内更新入口从 **1.2.1** 开始提供。在 **设置 → 本地生图 → 插件更新** 检查并安装即可。更新前先确认 tools 目录里没有另一份 `dsh-tavern-image`。
-
-更新完成后：
-
-1. 完整退出 DSH Desktop，包括托盘中的进程。
-2. 打开 `%USERPROFILE%\.dsh\profile-data\tavern\data\tools`。
-3. 将整个 `dsh-tavern-comfy` 文件夹改名为 `dsh-tavern-image`。
-4. 重新打开 DSH。
-
-配置、人物资料、工作流、图片缓存和历史记录会随文件夹一起保留。不要在 DSH 运行时改目录，也不要在原安装旁再克隆一份新插件。若新旧两个目录都已存在，先备份并确认各自的数据，再处理重复安装；不要直接合并或覆盖。
-
-**1.2.0 及更早版本**没有插件内更新入口。如果原目录是 Git 克隆安装，先备份并退出 DSH，确认当前分支是 `master`、没有要保留的本地代码修改，再在 PowerShell 中运行：
-
-~~~powershell
-cd "$env:USERPROFILE\.dsh\profile-data\tavern\data\tools\dsh-tavern-comfy"
-git remote set-url origin https://github.com/weixinlll/dsh-tavern-image.git
-git pull --ff-only origin master
-~~~
-
-更新后按上面的步骤改目录。命令提示冲突或无法快进时，先处理本地改动，不要强制覆盖。
-
-</details>
+仓库和插件 bundle ID 使用 `dsh-tavern-image`；为兼容已安装 Profile，npm 包名仍为 `dsh-tavern-comfy`，旧接口也继续工作。新安装会放在 `tools/dsh-tavern-image`，并由 DSH 官方插件包管理器登记 Profile 依赖和 bundle。旧安装迁移步骤见下方。
 
 ## 插件的长处
 
@@ -48,18 +28,48 @@ git pull --ff-only origin master
 
 需要已经能使用的 DSH Tavern，以及本地生图服务或在线平台的 API 地址和密钥。
 
-### 安装插件
+### Windows 安装
 
-Windows PowerShell：
+安装器默认使用 `%USERPROFILE%\.dsh` 下的 `tavern` Profile；可通过 `-Profile` 指定另一个**已经存在**的 Profile。安装器只安装插件源码，不运行仓库脚本；它调用 DSH 官方 CLI 的 `plugin add`，附带 `--ignore-scripts`，由 DSH 将依赖、`node_modules` 链接和 bundle 一起登记。若 `tools/dsh-tavern-image` 或 Profile 中已有同名依赖，安装器会停止，不覆盖已有内容；更新已安装插件请用插件自己的更新页。
+
+**推荐：从本地源码 ZIP 安装。** 在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。也可以用浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master)，然后在 PowerShell 中指定文件：
 
 ~~~powershell
-cd "$env:USERPROFILE\.dsh\profile-data\tavern\data\tools"
-git clone https://github.com/weixinlll/dsh-tavern-image.git
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\install-plugin.ps1" -SourceArchive "$env:USERPROFILE\Downloads\dsh-tavern-image-master.zip"
 ~~~
 
-其他系统在对应的 `~/.dsh/profile-data/tavern/data/tools` 目录安装。下载源码安装时，也要把插件文件放在 `tools/dsh-tavern-image` 中，避免多套一层目录。
+ZIP 顶层即使多套几层目录也能识别。安装器只复制插件包白名单，不复制 Git 历史、测试、`config.json`、`definitions.json`、世界书、缓存、任务记录或用户工作流。若已解压仓库，也可以传入 `-SourceDirectory`，安装器仍会逐个筛选允许的包文件。
 
-安装后完整退出并重新打开 DSH Desktop。只刷新页面不能替代宿主重启。
+有网络时，不带来源参数会先试官方 codeload，再试 GitHub Archive：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\install-plugin.ps1"
+~~~
+
+若下载失败，可先用浏览器下载 ZIP 再传入 `-SourceArchive`；也可以克隆源码到单独的临时目录并用 `-SourceDirectory` 安装：
+
+~~~powershell
+git clone https://github.com/weixinlll/dsh-tavern-image.git "$env:TEMP\dsh-tavern-image-source"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\dsh-tavern-image-source\scripts\install-plugin.ps1" -SourceDirectory "$env:TEMP\dsh-tavern-image-source" -Profile tavern
+~~~
+
+运行 `scripts\Package-DshTavernImage.ps1` 可生成可离线携带的 ZIP；解压后双击其中的 `Install-DshTavernImage.cmd`。插件 **设置 → 本地生图 → 插件更新**页的“本机安装包”入口也可导出源码 ZIP，拷贝到目标电脑后用 `-SourceArchive` 安装。这个入口用于下载和转移安装包；当前 DSH Desktop 的插件清单页没有经验证的 GitHub URL/ZIP 安装输入框，不要在该页粘贴仓库网址。
+
+安装器会显示插件版本和 ZIP 的 SHA-256，便于传输后比对；项目没有发布可信远端校验值，因此此哈希不代表签名或供应链验证。安装后完整退出并重新打开 DSH Desktop，刷新网页不能替代宿主重启。
+
+### 旧版目录迁移
+
+已有 `dsh-tavern-comfy` 安装不要再克隆一份。**1.2.1 及更新版本**先在 **设置 → 本地生图 → 插件更新**检查并安装。确认 `tools` 中没有另一份 `dsh-tavern-image` 后，完整退出 DSH（包括托盘进程），将旧插件文件夹改名为 `dsh-tavern-image`。目录改名不会更新 Profile 的依赖路径，必须重新运行 DSH 官方包管理器的 link 操作：
+
+~~~powershell
+$env:PATH = "$env:USERPROFILE\.dsh\runtime;$env:PATH"
+$dshCli = Join-Path $env:LOCALAPPDATA 'Programs\DSH Desktop\resources\app\node_modules\@deepseek-ai\dsh\lib\bin.js'
+node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-data/tavern/data/tools/dsh-tavern-image" --ignore-scripts
+~~~
+
+如果终端已配置 `dsh` 命令，也可用 `dsh plugin --profile tavern add "link:<插件完整路径>" --ignore-scripts`。以上调用的是 DSH 官方 CLI 的包管理入口；包名仍为 `dsh-tavern-comfy`，CLI 会改正 Profile link 与 `node_modules` 链接，并按包里的 patch 登记 `dsh-tavern-comfy` bundle（patch 中的插件 ID 是 `dsh-tavern-image`）。其他 Profile 请替换 `tavern`。不要只改目录名或手工编辑 Profile 的 bundle 清单；如果 DSH CLI/pnpm 命令失败，先修复官方包管理器，不要用裸 `pnpm add` 冒充完成注册。
+
+**1.2.0 及更早版本**若通过 Git 安装，可先检查 `git status` 和分支、备份本地改动并退出 DSH，再把旧远端改到官方仓库并快进更新。出现本地改动或冲突时停止，不要强制覆盖。更新后按上面步骤改名并重新登记 link。配置、人物资料和历史记录留在原目录；若新旧目录都存在，先核实备份，不要合并或覆盖。
 
 ### 配置生图服务
 
@@ -85,9 +95,15 @@ git clone https://github.com/weixinlll/dsh-tavern-image.git
 
 生成任务在后台运行，结算通知不需要等模型和图片全部完成。多张图各自完成后显示，较慢的一张不会挡住已经完成的图片。外部渠道默认同时生成 2 张，可以调整为 1–4 张；ComfyUI 的实际执行速度和顺序由它自己的队列决定。
 
-智能选图会等规划结果完整并通过校验后再提交，避免模型最后决定跳过时已经发出生图请求。关闭智能选图后，流式规划一旦输出完整画面块，就可以提前提交这一张，后面的规划与出图重叠进行。
+智能选图先输出一次明确的配图决定和原因；需要记录角色变化时，先完成角色更新块。决定配图后，每张完整提示词通过校验就提交，模型继续规划后面的图片。第一张出图不需要等待整份规划结束。
+
+规划决定不能在提交后撤回。后续输出出现矛盾或中断时，会停止尚未提交的图片并报告错误，保留已提交的任务。模型决定跳过时不会提交图片。重复提示词、缺少正文锚点或没有闭合的画面块也不会提交。
+
+多张图按重要性输出，用不同景别、动作或叙事用途表现正文；人物外貌、服装和地点跟随各画面对应的剧情时点。具体构图由模型决定，插件会拦截提示词完全相同的重复任务。
 
 当前 Tavern 的公开事件是在轮次结算后触发。插件能减少规划和出图之间的等待，但不能把启动时机提前到正文生成中，也不会加速 Tavern 本身的结算。
+
+同一版正文的自动处理会复用已有计划，避免重复事件再次收费。更换渠道或世界书规则会用于后续新轮次；需要重新处理当前轮时，使用手动生图。
 
 ### 自动规划和正文标记有什么区别
 
@@ -196,16 +212,31 @@ git clone https://github.com/weixinlll/dsh-tavern-image.git
 | 右键或长按图片 | 打开提示词和重画操作 |
 | 查看器左右按钮或方向键 | 在图片之间翻页 |
 | 滚轮、拖动 | 缩放和平移查看细节 |
-| 编辑正负提示词后重画 | 在原位置换成新图，并保留重画版本链 |
+| 编辑正负提示词后重画 | 新图成功后在原位置替换，旧图文件留在历史图中 |
+| 取消这张图 | 停止等待指定任务，其他图片继续生成 |
+| 重试这张图 | 只重试已确认失败的一张，不重新规划整轮 |
+| 重画时选择渠道 | 这次使用所选渠道，不改全局生图设置 |
 | 历史图面板 | 查看图片记录、打开大图或批量删除 |
 
 也可以让后台模型按要求改写这张图的提示词，再用修改结果重画。图片概括由 Tavern 显示一处，插件保留替代文本，避免正文下重复出现同一说明。
 
-重画版本链保存在当前浏览器的本地存储中，刷新后仍可使用；它与服务端图片缓存不同，清理浏览器数据或换设备后不能指望自动同步这份版本链。
+正文中的单张重画通过 Tavern 的媒体接口更新原位置。新图成功前保留旧图，失败只显示该任务的错误；任务记录保存在服务端。历史图查看器的重画版本链仍保存在当前浏览器中，清理浏览器数据或换设备后不会自动同步。
+
+再次点击某轮的「生图」会重新规划并替换这轮原来的配图。新图全部成功时清理旧配图；部分失败时保留没有被成功替换的旧图。历史图片文件仍留在历史图中。
+
+每张图分别显示排队、生成、完成、失败或状态待确认。取消已提交任务只能停止本地等待，平台仍可能继续生成；插件不会为了取消一张图去中断 ComfyUI 的整个队列。请求超时或响应丢失时不自动重发。已知的 ComfyUI、百炼异步任务会查询原编号；查不到可靠结果时，请先到平台确认用量和任务。
 
 ## 世界书与图片格式
 
 「世界书」页管理发给规划模型的配图规则，例如场景选择、镜头、角色资料使用和输出格式。可以导入世界书 JSON，也可以粘贴 JSON 或纯文本，逐条编辑和启用；未启用的条目不会进入配图规则。
+
+每条规则可以选择常驻或关键词触发，并限制适用的生图渠道。常驻规则每轮携带；关键词规则只在本轮正文命中任一关键词时携带。没有填写关键词的触发条目不会注入。渠道全部不勾选时适用所有渠道，旧条目默认保留常驻行为。
+
+人物的详细资料优先提供给本轮正文提到的角色，其他人物只留姓名索引。没有可靠匹配到姓名时会回退到全部可用角色，避免只用代词的正文遗漏人物。世界书页可以展开上次规划的条目、纳入或排除原因、角色和输入字符统计。
+
+固定规则、输出协议和画风要求放在请求前部，动态条目、人物资料和本轮任务放在后部，方便支持上下文缓存的平台复用固定内容。请求仍通过 DSH 的模型接口发送；是否命中缓存取决于平台，字符统计不代表 token 数或实际费用，也不是模型的永久记忆。
+
+导出会先尝试复制 JSON；剪贴板不可用时改为下载文件，并保留可手动复制的文本。
 
 默认配图规则用于首次初始化，已保存的个人规则不会随插件升级重置。导入的其他引擎宏和包装语法会做清理；只导入适合绘图规划的内容更容易检查结果。
 
@@ -252,7 +283,7 @@ git clone https://github.com/weixinlll/dsh-tavern-image.git
 
 ## 兼容与许可
 
-当前版本 **2.1.0**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
+当前版本 **2.5.0**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
 
 为保留现有 DSH 安装的包解析兼容，包名和浏览器模块加载键仍使用 `dsh-tavern-comfy`；插件 ID、主接口前缀和新安装目录使用 `dsh-tavern-image`。
 

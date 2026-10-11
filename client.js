@@ -201,7 +201,10 @@ let openImageOverlay = null
         let data = null
         try { data = await response.json() } catch { data = null }
         if (!response.ok || (data && data.ok === false)) {
-          throw new Error((data && data.error) || `HTTP ${response.status}`)
+          throw Object.assign(new Error((data && data.error) || `HTTP ${response.status}`), {
+            code: data && data.code,
+            submissionNotStarted: data && data.submissionNotStarted === true,
+          })
         }
         return data
       })
@@ -393,10 +396,80 @@ let openImageOverlay = null
     function OfficialImage(props) {
       const { item } = props
       const jobId = String(item && item.data && item.data.jobId || '')
+      const replacement = item && item.data && item.data.replacement && typeof item.data.replacement === 'object' ? item.data.replacement : null
+      const activeJobId = String(replacement && replacement.jobId || jobId)
+      const mediaContext = {
+        gameId: String(props.gameId || ''), turn: props.turn,
+        textVersion: String(item && item.textVersion || ''), mediaId: String(item && item.id || ''), jobId,
+      }
       const title = String(item && item.caption || '')
       const [imgError, setImgError] = useState('')
       const [imgNonce, setImgNonce] = useState(0)
       const [imgRetry, setImgRetry] = useState(0)
+      const [actionBusy, setActionBusy] = useState(false)
+      const [polledJob, setPolledJob] = useState(null)
+      const [actionJobId, setActionJobId] = useState('')
+
+      useEffect(() => { setPolledJob(null); setActionJobId('') }, [item && item.id])
+      const effectiveJobId = String(actionJobId || activeJobId)
+
+      // Poll only this media item's active job. GET is safe to retry; paid POSTs below are single-flight.
+      useEffect(() => {
+        const jobState = polledJob && String(polledJob.id || '') === effectiveJobId ? String(polledJob.state || '') : ''
+        const state = String(jobState || replacement && replacement.state || item && item.status || '')
+        if (!effectiveJobId || !['pending', 'running', 'queued', 'processing', 'uncertain', 'failed', 'cancelled'].includes(state)) return undefined
+        let live = true
+        const poll = () => jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(effectiveJobId), { cache: 'no-store' })
+          .then(result => {
+            if (!live || !result || !result.job) return
+            setPolledJob(result.job)
+            if (String(result.job.id || '') === effectiveJobId && ['done', 'ready', 'failed', 'cancelled'].includes(result.job.state)) mediaUncertainActions.delete(mediaContext.mediaId)
+          })
+          .catch(() => {})
+        poll()
+        if (state === 'failed' || state === 'cancelled' || state === 'uncertain') return () => { live = false }
+        const timer = setInterval(poll, 1800)
+        return () => { live = false; clearInterval(timer) }
+      }, [effectiveJobId, replacement && replacement.state, item && item.status, polledJob && polledJob.state])
+
+      async function mediaAction(operation, extra = {}) {
+        const lock = mediaContext.mediaId
+        const readOnlyRecovery = operation === 'recover'
+        if (actionBusy || mediaPostLocks.has(lock) || (!readOnlyRecovery && mediaUncertainActions.has(lock)) || !validMediaContext(mediaContext)) return
+        mediaPostLocks.add(lock)
+        setActionBusy(true)
+        try {
+          const result = await jsonFetch(BASE + '/media-action', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ operation, ...mediaContext, jobId: effectiveJobId, ...extra }),
+          })
+          if (!result?.ok) throw new Error(result?.error || '请求未确认')
+          const nextJobId = String(result.jobId || effectiveJobId)
+          setActionJobId(nextJobId)
+          setPolledJob({ ...(polledJob || {}), ...result, id: nextJobId, state: result.state || (operation === 'cancel' ? 'cancelled' : 'pending') })
+          if (result.state === 'uncertain' || result.requestMayHaveSucceeded === true) mediaUncertainActions.add(lock)
+          else if (readOnlyRecovery && ['ready', 'done', 'failed', 'cancelled'].includes(result.state)) mediaUncertainActions.delete(lock)
+          if (typeof showToast === 'function') {
+            if (readOnlyRecovery) showToast(({ ready: '已找回这张图', done: '已找回这张图', pending: '已重新查询，任务仍在处理中', running: '已重新查询，任务仍在处理中', failed: '已确认这张图失败', uncertain: '状态仍待确认，请到生图平台检查' })[result.state] || '已重新查询这张图的状态', result.state === 'uncertain' ? 'fail' : 'ok')
+            else if (operation !== 'cancel') showToast('已提交这张图的任务', 'ok')
+            else if (result.state === 'uncertain' || result.requestMayHaveSucceeded === true) showToast('取消状态待确认，请到生图平台检查；不会自动重试', 'fail')
+            else if (result.state === 'cancelled' && (result.cancelMayHaveContinued === true || result.requestStarted === true)) showToast('已停止本地等待，但平台可能继续生成；请检查平台用量', 'fail')
+            else if (result.state === 'cancelled') showToast('已取消这张图的任务', 'ok')
+            else if (result.state === 'done') showToast('这张图已完成，未取消', 'ok')
+            else showToast('取消状态：' + String(result.state || '待确认') + '；请检查这张图的任务', 'fail')
+          }
+        } catch (error) {
+          if (error && error.submissionNotStarted === true) {
+            mediaUncertainActions.delete(lock)
+            if (typeof showToast === 'function') showToast(String(error.message || '请求未提交'), 'fail')
+            setPolledJob({ ...(polledJob || {}), state: 'failed', error: String(error.message || error), id: effectiveJobId })
+            return
+          }
+          // Network errors are ambiguous: never repeat a possibly accepted paid request.
+          if (!readOnlyRecovery) mediaUncertainActions.add(lock)
+          setPolledJob({ ...(polledJob || {}), state: 'uncertain', error: String(error?.message || error), id: effectiveJobId })
+        } finally { mediaPostLocks.delete(lock); setActionBusy(false) }
+      }
 
       // 取图失败自动重试：宿主报 ready 之后文件可能还在写，这段窗口会 404
       useEffect(() => {
@@ -405,44 +478,63 @@ let openImageOverlay = null
         return () => clearTimeout(timer)
       }, [imgError, imgRetry])
 
-      if (item && item.status === 'failed') {
-        return h('div', { style: wrapStyle },
-          h('span', { style: noteStyle }, '配图失败：' + String(item.error || '未知原因').slice(0, 120)))
-      }
-      const src = String(item && item.url || '') || (jobId ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
-      if (!src || (item && item.status === 'pending')) {
-        return h('div', { style: wrapStyle },
-          h('span', { style: noteStyle }, '🎨 正在画…' + (title ? '「' + title + '」' : '')))
-      }
-      if (imgError && imgRetry >= 20) {
-        return h('div', { style: wrapStyle },
-          h('span', { style: noteStyle }, '图取不到（' + imgError + '）　'),
-          h('button', {
-            type: 'button',
-            style: { fontSize: '12px', padding: '3px 12px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'transparent', color: '#dbe3ee', cursor: 'pointer' },
-            onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) },
-          }, '重试'))
-      }
-      if (imgError) {
-        return h('div', { style: wrapStyle }, h('span', { style: noteStyle }, '🎨 正在取回…（第 ' + imgRetry + ' 次）'))
-      }
+      const currentPolledJob = polledJob && String(polledJob.id || '') === effectiveJobId ? polledJob : null
+      const recoveredReady = Boolean(currentPolledJob && ['ready', 'done'].includes(currentPolledJob.state))
+      const displayJobId = recoveredReady ? effectiveJobId : jobId
+      const displayMediaContext = { ...mediaContext, jobId: displayJobId }
+      const activeReplacement = replacement && !recoveredReady
+      const src = recoveredReady
+        ? BASE + '/jobs?id=' + encodeURIComponent(effectiveJobId) + '&image=1'
+        : String(item && item.url || '') || (jobId && !(item && item.status === 'failed') && !(item && item.data && item.data.cancelled === true) ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
+      const jobMayHaveReachedProvider = Boolean(currentPolledJob && currentPolledJob.requestMayHaveSucceeded === true)
+      const isUncertain = Boolean((currentPolledJob && currentPolledJob.state === 'uncertain') || jobMayHaveReachedProvider || (replacement && replacement.state === 'uncertain' && !recoveredReady))
+      const isCancelled = !recoveredReady && (Boolean(item && item.data && item.data.cancelled === true) || Boolean(currentPolledJob && currentPolledJob.state === 'cancelled') || Boolean(replacement && replacement.state === 'cancelled'))
+      const taskState = recoveredReady ? 'done' : isUncertain ? 'uncertain' : isCancelled ? 'cancelled' : String(currentPolledJob && currentPolledJob.state || replacement && replacement.state || (item && item.status === 'failed' ? 'failed' : item && item.status === 'pending' ? 'pending' : 'done'))
+      const cancellationMayContinue = Boolean((item && item.data && item.data.cancelMayHaveContinued === true) || (replacement && (replacement.cancelMayHaveContinued === true || replacement.requestStarted === true)) || (currentPolledJob && currentPolledJob.state === 'cancelled' && currentPolledJob.requestStarted === true))
+      const statusLabel = ({ queued: '排队中', pending: '排队中', running: '生成中', processing: '生成中', done: '完成', ready: '完成', failed: '失败', cancelled: '已取消', uncertain: '状态待确认' })[taskState] || '状态待确认'
+      // 顺利出图时不再挂一行「完成」文案：图本身就是结果，状态行只在需要说明时出现。
+      const quietStatus = taskState === 'done' && !activeReplacement && !(item && item.status === 'failed')
       // TavernPluginMediaItem 会统一追加 figcaption；这里保留 alt 和预览标题即可。
       return h('div', { style: wrapStyle },
-        h('img', {
+        src && (!imgError || imgRetry < 20) ? h('img', {
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
           onError: () => setImgError('加载失败'),
           title: '点一下看大图 · 右键或长按改提示词 / 重画',
           // 覆盖 tavern.css 的 .dsh-tavern-illustration img 限制（320x240）：
           // 行内 style 优先级高于 CSS 类，所以这里写死 width/maxWidth/maxHeight 三件套。
           style: { display: 'block', width: 'auto', height: 'auto', maxWidth: 'min(660px, 96vw)', maxHeight: 'none', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px 0' },
-          onClick: () => viewImage(jobId, title),
-          onContextMenu: event => { event.preventDefault(); openEditorFor(jobId, title) },
-          onMouseDown: () => beginPress(jobId, title),
+          onClick: () => viewImage(displayJobId, title),
+          onContextMenu: event => {
+            cancelPress()
+            event.preventDefault()
+            event.stopPropagation()
+            openEditorFor(displayJobId, title, displayMediaContext)
+          },
+          onMouseDown: event => { if (event.button === 0) beginPress(displayJobId, title, displayMediaContext) },
           onMouseUp: cancelPress, onMouseLeave: cancelPress,
-          onTouchStart: () => beginPress(jobId, title),
+          onTouchStart: () => beginPress(displayJobId, title, displayMediaContext),
           onTouchEnd: cancelPress, onTouchMove: cancelPress,
-        }))
+        }) : null,
+        imgError ? h('div', { style: noteStyle }, imgRetry >= 20 ? '图取不到（' + imgError + '）　' : '正在取回…（第 ' + imgRetry + ' 次）', imgRetry >= 20 ? h('button', { type: 'button', onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) } }, '重新读取') : null) : null,
+        quietStatus ? null : h('div', { style: { ...noteStyle, marginTop: '4px' }, role: 'status', 'aria-live': 'polite' },
+          taskState === 'uncertain' ? '状态待确认：任务号 ' + effectiveJobId + (currentPolledJob?.providerTaskId ? '（平台任务 ' + String(currentPolledJob.providerTaskId) + '）' : '') + '；请到生图平台检查，暂不自动重试。' :
+          taskState === 'cancelled' && cancellationMayContinue ? '已停止本地等待，但平台请求可能已发出并继续生成；请到生图平台检查用量。' + (replacement?.error ? ' ' + String(replacement.error).slice(0, 140) : '') :
+          taskState === 'cancelled' ? '已取消' :
+          (activeReplacement ? '替换任务' + statusLabel + (replacement.error || currentPolledJob?.error ? '：' + String(replacement.error || currentPolledJob.error).slice(0, 100) : '') :
+           item && item.status === 'failed' ? '配图失败：' + String(item.error || currentPolledJob?.error || '未知原因').slice(0, 120) : statusLabel)),
+        validMediaContext(mediaContext) && (Boolean(replacement) || item && item.status === 'pending' || ['pending', 'running', 'queued', 'processing'].includes(currentPolledJob?.state)) && !actionBusy && ['pending', 'running', 'queued', 'processing'].includes(taskState)
+          ? h('button', { type: 'button', onClick: () => mediaAction('cancel'), disabled: actionBusy }, '取消这张图') : null,
+        validMediaContext(mediaContext) && !actionBusy && taskState === 'failed' && !jobMayHaveReachedProvider
+          ? h('button', { type: 'button', onClick: () => mediaAction('retry'), disabled: actionBusy }, '重试这张图') : null,
+        validMediaContext(mediaContext) && taskState === 'uncertain'
+          ? h('button', { type: 'button', onClick: () => mediaAction('recover'), disabled: actionBusy }, actionBusy ? '查询中…' : '重新查询状态') : null)
     }
+
+    function validMediaContext(context) {
+      return Boolean(context && context.gameId && context.mediaId && context.jobId && context.textVersion && Number.isFinite(Number(context.turn)))
+    }
+    const mediaPostLocks = new Set()
+    const mediaUncertainActions = new Set()
 
     /** 段落：只渲染正文，不再带「画这段」按钮（生图入口统一在消息下方）。 */
     function Segment(props) {
@@ -497,10 +589,10 @@ let openImageOverlay = null
     /**
      * 长按 / 右键图片：打开编辑器，并把这张图的提示词读出来。
      */
-    function openEditorFor(jobId, title) {
+    function openEditorFor(jobId, title, mediaContext) {
       try {
         if (!jobId || typeof openPromptEditor !== 'function') return
-        openPromptEditor({ open: true, jobId: String(jobId), prompt: '', negative: '', instruction: '', note: '正在读取提示词…', busy: '' })
+        openPromptEditor({ open: true, jobId: String(jobId), prompt: '', negative: '', instruction: '', note: '正在读取提示词…', busy: '', submitted: false, uncertain: false, mediaContext: validMediaContext(mediaContext) ? mediaContext : null, channelId: '' })
         jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(String(jobId)), { cache: 'no-store' })
           .then(r => {
             if (!r?.ok || !r.job) { openPromptEditor({ note: '读不到提示词：' + (r?.error || '') }); return }
@@ -521,9 +613,9 @@ let openImageOverlay = null
 
     /** 长按计时器（按住 0.55 秒算长按） */
     let pressTimer = null
-    function beginPress(jobId, title) {
+    function beginPress(jobId, title, mediaContext) {
       cancelPress()
-      pressTimer = setTimeout(() => { pressTimer = null; openEditorFor(jobId, title) }, 550)
+      pressTimer = setTimeout(() => { pressTimer = null; openEditorFor(jobId, title, mediaContext) }, 550)
     }
     function cancelPress() {
       if (pressTimer) { clearTimeout(pressTimer); pressTimer = null }
@@ -807,6 +899,17 @@ function versionsOf(jobId) {
     function PromptEditor() {
       const [view, setView] = React.useState({ open: false, jobId: '', prompt: '', negative: '', instruction: '', note: '', busy: '', loading: false })
       openPromptEditor = (next) => setView(cur => Object.assign({}, cur, next))
+      useEffect(() => {
+        if (!view.open || !view.mediaContext) return undefined
+        let live = true
+        jsonFetch(BASE + '/state', { cache: 'no-store' }).then(result => {
+          if (!live) return
+          const config = result?.config || {}
+          const channels = (Array.isArray(config.imageChannels) ? config.imageChannels : []).map(channel => ({ id: String(channel.id || ''), name: String(channel.name || channel.id || '') })).filter(channel => channel.id)
+          openPromptEditor({ channels, comfyAvailable: Boolean(config.comfyUrl || config.comfyHost || config.comfyEnabled) })
+        }).catch(() => { if (live) openPromptEditor({ channels: [], channelLoadFailed: true }) })
+        return () => { live = false }
+      }, [view.open, view.mediaContext])
       if (!view.open) return null
 
       const close = () => openPromptEditor({ open: false, busy: '', note: '', instruction: '' })
@@ -829,8 +932,23 @@ function versionsOf(jobId) {
       }
 
       async function redraw() {
+        const lock = String(view.mediaContext && view.mediaContext.mediaId || '')
+        if (view.mediaContext && (mediaPostLocks.has(lock) || mediaUncertainActions.has(lock) || !validMediaContext(view.mediaContext))) return
+        if (view.mediaContext) mediaPostLocks.add(lock)
         openPromptEditor({ busy: 'redraw', note: '正在重画…' })
         try {
+          if (view.mediaContext) {
+            if (!validMediaContext(view.mediaContext)) { say('当前图片上下文不完整，无法提交单图重画'); return }
+            const body = { operation: 'redraw', ...view.mediaContext, jobId: view.mediaContext.jobId, prompt: view.prompt, negative: view.negative }
+            if (view.channelId) body.channelId = view.channelId
+            const result = await jsonFetch(BASE + '/media-action', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+            })
+            if (!result?.ok || !result.jobId) { say('重画状态待确认：' + (result?.error || '请检查生图平台，暂不自动重试')); return }
+            mediaUncertainActions.delete(lock)
+            openPromptEditor({ busy: '', submitted: true, note: '已提交重画，任务号 ' + String(result.jobId) + '；完成后会替换这张图。' })
+            return
+          }
           const r = await jsonFetch(BASE + '/redraw', {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ jobId: view.jobId, prompt: view.prompt, negative: view.negative }),
@@ -845,8 +963,11 @@ function versionsOf(jobId) {
                   openImageOverlay({ open: true, jobIds: chain, versions: chain, versionAt: chain.length - 1, note: '重画完成（下方可对比历史版本）', working: false, index: chain.length - 1 })
                 })()
         } catch (error) {
-          say('失败：' + (error?.message ?? error))
+          if (view.mediaContext) mediaUncertainActions.add(lock)
+          openPromptEditor({ uncertain: Boolean(view.mediaContext) })
+          say(view.mediaContext ? '状态待确认（来源任务 ' + view.mediaContext.jobId + '）；请求可能已提交，请检查生图平台，暂不自动重试。' : '失败：' + (error?.message ?? error))
         } finally {
+          if (view.mediaContext) mediaPostLocks.delete(lock)
           openPromptEditor({ busy: '' })
         }
       }
@@ -858,7 +979,7 @@ function versionsOf(jobId) {
         fontFamily: 'inherit', resize: 'vertical',
       }
       const btn = (label, onClick, primary) => React.createElement('button', {
-        type: 'button', onClick, disabled: Boolean(view.busy),
+        type: 'button', onClick, disabled: Boolean(view.busy || view.submitted || view.uncertain) || Boolean(view.mediaContext && mediaUncertainActions.has(String(view.mediaContext.mediaId || ''))),
         style: {
           padding: '6px 16px', fontSize: '13px', borderRadius: '9px', cursor: view.busy ? 'default' : 'pointer',
           border: '1px solid ' + (primary ? 'rgba(106,168,255,.6)' : 'rgba(120,140,170,.45)'),
@@ -898,13 +1019,22 @@ function versionsOf(jobId) {
           style: Object.assign({}, area, { minHeight: '0', height: '36px' }),
           onChange: (e) => openPromptEditor({ instruction: e.target.value }),
         }),
+        view.mediaContext ? React.createElement('label', { style: { display: 'flex', gap: '8px', alignItems: 'center', color: '#9aa3b2', marginTop: '12px' } },
+          '本次渠道', React.createElement('select', {
+            'aria-label': '本次生图渠道', value: view.channelId || '', disabled: Boolean(view.busy),
+            onChange: event => openPromptEditor({ channelId: event.target.value }),
+            style: { background: '#12151b', color: '#dbe3ee', border: '1px solid rgba(120,140,170,.4)', borderRadius: '7px', padding: '5px' },
+          },
+            React.createElement('option', { value: '' }, '沿用原渠道'),
+            ...(view.channels || []).map(channel => React.createElement('option', { key: channel.id, value: channel.id }, channel.name)),
+            view.comfyAvailable ? React.createElement('option', { value: 'comfyui' }, '当前 ComfyUI 设置') : null)) : null,
         React.createElement('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', marginTop: '16px', flexWrap: 'wrap' } },
           btn('🤖 让后台改', improve),
           btn('👁 看展开结果', () => {
             if (!view.finalPrompt) { say('这张图没有记录展开结果'); return }
             openPromptEditor({ prompt: view.finalPrompt, rawPrompt: view.prompt, note: '这是展开后的最终提示词（点关闭后回到原始）' })
           }),
-          btn(view.busy === 'redraw' ? '🎨 重画中…' : '🎨 用这段重画', redraw, true),
+          btn(view.busy === 'redraw' ? '🎨 提交中…' : '🎨 用这段重画', redraw, true),
           view.note ? React.createElement('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, view.note) : null,
         ),
         React.createElement('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '提示：改完提示词点「用这段重画」，会在同一条消息里换成新图。'),
@@ -1831,6 +1961,7 @@ function versionsOf(jobId) {
       const libraryDirty = React.useRef(false)
       const libraryRevision = React.useRef(0)
       const librarySaveQueue = React.useRef(Promise.resolve())
+      const configSaveQueue = React.useRef(Promise.resolve())
       function setData(update) {
         const next = typeof update === 'function' ? update(dataRef.current) : update
         dataRef.current = next
@@ -1913,6 +2044,7 @@ function versionsOf(jobId) {
       const [wbImportOpen, setWbImportOpen] = React.useState(false)
       const [wbPaste, setWbPaste] = React.useState('')
       const [wbNote, setWbNote] = React.useState('')
+      const [wbDrafts, setWbDrafts] = React.useState({})
       // 工作流：展开哪张 / 它的详情 / 导入面板 / ComfyUI 已装的 LoRA
       const [wfOpen, setWfOpen] = React.useState('')
       const [wfGraphFile, setWfGraphFile] = React.useState('')
@@ -1933,6 +2065,8 @@ function versionsOf(jobId) {
       const [comfyStatus, setComfyStatus] = React.useState(null)
       // API secrets stay in local input drafts; /state returns only hasApiKey/hasPassword flags.
       const [channelSecretDrafts, setChannelSecretDrafts] = React.useState({})
+      // ComfyUI credentials follow the same rule: state exposes only presence flags.
+      const [comfySecretDrafts, setComfySecretDrafts] = React.useState({ token: '', pass: '' })
       const [channelTestStatuses, setChannelTestStatuses] = React.useState({})
       const channelDraftRevisions = React.useRef({})
       const [wfTestNote, setWfTestNote] = React.useState('')
@@ -1942,7 +2076,9 @@ function versionsOf(jobId) {
       const [wfValues, setWfValues] = React.useState(null)
       // 世界书编辑防抖：别每敲一个字就写一次盘（会和上一次写入撞车，报 EPERM）
       const wbTimer = React.useRef(null)
-      const wbSeq = React.useRef(0)
+      const wbPending = React.useRef({})
+      const wbWriteQueue = React.useRef(Promise.resolve())
+      const wbDraftRevisions = React.useRef({})
 
       // 防重入：上一轮 /state 还没回来就不再发（慢网络下会堆请求）
       const refreshInFlight = React.useRef(false)
@@ -1957,6 +2093,12 @@ function versionsOf(jobId) {
       }
       React.useEffect(() => { refresh() }, [])
       React.useEffect(() => { loadProviders() }, [])
+      React.useEffect(() => {
+        const current = data?.config
+        if (!current) return
+        void loadReasoning(current.plannerProvider, current.plannerModel)
+        void loadReasoning(current.visionProvider, current.visionModel)
+      }, [data?.config?.plannerProvider, data?.config?.plannerModel, data?.config?.visionProvider, data?.config?.visionModel])
       // 等 /state 到位再测 ComfyUI：那时才拿得到 comfyUrl，也避开首次渲染的 config TDZ
       React.useEffect(() => { if (data?.config?.imageBackend === 'comfyui') loadComfyStatus() }, [data?.config?.imageBackend])
       const channelTestsInFlight = React.useRef({})
@@ -2115,14 +2257,18 @@ function versionsOf(jobId) {
         }
       }
       async function save(patch) {
-        setNote('保存中…')
-        const revision = libraryRevision.current
-        try {
-          const r = await post('/config', { config: patch })
-          receiveState(r.state, revision)
-          setNote('已保存')
-          return r
-        } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)); return null }
+        const operation = configSaveQueue.current.catch(() => {}).then(async () => {
+          setNote('保存中…')
+          const revision = libraryRevision.current
+          try {
+            const r = await post('/config', { config: patch })
+            receiveState(r.state, revision)
+            setNote('已保存')
+            return r
+          } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)); return null }
+        })
+        configSaveQueue.current = operation.catch(() => {})
+        return operation
       }
 
       if (!data) return h('div', { style: Object.assign({}, S.surface, { padding: '18px', fontSize: '13px' }) }, note || '正在读取…')
@@ -2235,7 +2381,7 @@ function versionsOf(jobId) {
         const full = (extra) => Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box', colorScheme: 'dark' }, extra || {})
         const label = (text, hint) => h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '5px' } },
           text, hint ? h('span', { style: { color: '#9aa3b2', marginLeft: '6px' } }, hint) : null)
-        const setCfg = (patch) => setData(Object.assign({}, data, { config: Object.assign({}, config, patch) }))
+        const setCfg = (patch) => setData(current => Object.assign({}, current, { config: Object.assign({}, current?.config || {}, patch) }))
         const nextId = (provider) => provider + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7)
         const defaultChannel = provider => {
           const preset = providerOptions.find(item => item.id === provider) || {}
@@ -2270,10 +2416,17 @@ function versionsOf(jobId) {
           modelSuggestions.length ? h('datalist', { id: 'image-models-' + channel.id }, modelSuggestions.map(model => h('option', { key: model, value: model }))) : null) : null
         const generatePathPlaceholder = ({ novelai: '/ai/generate-image', openai: '/images/generations', 'gemini-chat': '/chat/completions', grok: '/images/generations', seedream: '/images/generations', qwen: '/services/aigc/multimodal-generation/generation', sdwebui: '/sdapi/v1/txt2img' })[backend]
         const authMode = String(config.comfyAuthMode ?? 'none')
-        const saveComfy = () => save({
-          comfyUrl: config.comfyUrl || '', comfyAuthMode: authMode,
-          comfyAuthToken: config.comfyAuthToken || '', comfyAuthUser: config.comfyAuthUser || '', comfyAuthPass: config.comfyAuthPass || '',
-        })
+        const saveComfy = async () => {
+          const patch = {
+            comfyUrl: config.comfyUrl || '', comfyAuthMode: authMode,
+            comfyAuthUser: config.comfyAuthUser || '',
+          }
+          if (comfySecretDrafts.token) patch.comfyAuthToken = comfySecretDrafts.token
+          if (comfySecretDrafts.pass) patch.comfyAuthPass = comfySecretDrafts.pass
+          const saved = await save(patch)
+          if (saved) setComfySecretDrafts({ token: '', pass: '' })
+          return saved
+        }
         return h('div', { style: S.card },
           h('div', { style: { fontSize: '13px', marginBottom: '10px' } }, '生图后端'),
           h('div', { style: { marginBottom: '12px' } },
@@ -2300,13 +2453,26 @@ function versionsOf(jobId) {
               h('select', { value: authMode, style: full(), onChange: e => { const v = e.target.value; setCfg({ comfyAuthMode: v }); save({ comfyAuthMode: v }) } },
                 h('option', { value: 'none', style: optStyle }, '无需鉴权'), h('option', { value: 'bearer', style: optStyle }, 'Bearer Token'), h('option', { value: 'basic', style: optStyle }, 'Basic（用户名 / 密码）')),
             ),
-            authMode === 'bearer' ? h('div', { style: { marginBottom: '12px' } }, label('Token'), h('input', { type: 'password', value: config.comfyAuthToken || '', placeholder: '粘贴 token', style: full(), onChange: e => setCfg({ comfyAuthToken: e.target.value }) })) : null,
+            authMode === 'bearer' ? h('div', { style: { marginBottom: '12px' } },
+              label('Token', config.comfyHasAuthToken ? '已保存；留空保留原 Token' : ''),
+              h('input', { type: 'password', value: comfySecretDrafts.token, placeholder: config.comfyHasAuthToken ? '已保存，输入新 Token 可替换' : '粘贴 Token', style: full(), onChange: e => setComfySecretDrafts(current => Object.assign({}, current, { token: e.target.value })) }),
+              config.comfyHasAuthToken ? h('button', { type: 'button', style: buttonStyle, onClick: async () => {
+                const saved = await save({ clearComfyAuthToken: true })
+                if (saved) setComfySecretDrafts(current => Object.assign({}, current, { token: '' }))
+              } }, '清除已保存 Token') : null) : null,
             authMode === 'basic' ? h('div', { style: { marginBottom: '12px' } },
               label('用户名'), h('input', { type: 'text', value: config.comfyAuthUser || '', style: Object.assign(full(), { marginBottom: '8px' }), onChange: e => setCfg({ comfyAuthUser: e.target.value }) }),
-              label('密码'), h('input', { type: 'password', value: config.comfyAuthPass || '', style: full(), onChange: e => setCfg({ comfyAuthPass: e.target.value }) })) : null,
+              label('密码', config.comfyHasAuthPass ? '已保存；留空保留原密码' : ''),
+              h('input', { type: 'password', value: comfySecretDrafts.pass, placeholder: config.comfyHasAuthPass ? '已保存，输入新密码可替换' : '输入密码', style: full(), onChange: e => setComfySecretDrafts(current => Object.assign({}, current, { pass: e.target.value })) }),
+              config.comfyHasAuthPass ? h('button', { type: 'button', style: buttonStyle, onClick: async () => {
+                const saved = await save({ clearComfyAuthPass: true })
+                if (saved) setComfySecretDrafts(current => Object.assign({}, current, { pass: '' }))
+              } }, '清除已保存密码') : null) : null,
             h('button', { style: Object.assign({}, buttonStyle, { fontWeight: 600 }), onClick: async () => {
-              await saveComfy(); setComfyStatus({ checking: true })
-              const r = await post('/comfy-test', { url: config.comfyUrl || '', authMode, authToken: config.comfyAuthToken || '', authUser: config.comfyAuthUser || '', authPass: config.comfyAuthPass || '' }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
+              const saved = await saveComfy()
+              if (!saved) return
+              setComfyStatus({ checking: true })
+              const r = await post('/comfy-test', { url: saved.state?.config?.comfyUrl || config.comfyUrl || '' }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
               setComfyStatus(r)
             } }, comfyStatus?.checking ? '测试中…' : '测试连接与鉴权'),
             comfyStatus?.checking ? h('span', { style: { fontSize: '12px', color: '#9aa3b2', marginLeft: '10px' } }, '正在连接…') : null,
@@ -2447,7 +2613,7 @@ function versionsOf(jobId) {
                 return '世界书（' + all.length + ' 条，已启用 ' + on + ' 条）'
               })()),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } },
-              '启用的条目会作为「画图规则」发给规划模型。开关和内容都在「世界书」标签页里改。'),
+              '启用的常驻条目每轮发送；关键词条目仅在正文命中时发送，并按适用渠道筛选。旧条目默认常驻。触发方式和内容可在「世界书」标签页里改。'),
             h('div', { style: S.row },
               h('button', { style: buttonStyle, onClick: () => setTab('worldbook') }, '📖 去世界书里勾选 / 编辑'),
               h('button', { style: buttonStyle, onClick: () => { setTab('worldbook'); setWbImportOpen(true) } }, '📥 导入世界书'),
@@ -3516,28 +3682,125 @@ function versionsOf(jobId) {
       function worldbookTab() {
         const list = data.worldbook || []
         const onCount = list.filter(e => e.enabled !== false).length
+        const context = data.plannerContext || null
+        const providers = [
+          ['comfyui', 'ComfyUI'], ['novelai', 'NovelAI'], ['openai', 'OpenAI'], ['gemini', 'Gemini'],
+          ['gemini-chat', 'Gemini Chat'], ['grok', 'Grok'], ['seedream', 'Seedream'], ['qwen', 'Qwen'], ['sdwebui', 'SD WebUI'],
+        ]
 
         async function refreshWb() {
           const r = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
           if (r) receiveState(r)
         }
-        async function patchEntry(index, patch, remove, tip) {
-          try {
+        function queueWbWrite(write) {
+          const task = wbWriteQueue.current.then(write, write)
+          wbWriteQueue.current = task.catch(() => {})
+          return task
+        }
+        async function sendEntryPatch(index, patch, remove, tip) {
+          return queueWbWrite(async () => {
             const r = await post('/worldbook-entry', remove ? { index, remove: true } : { index, patch })
-            if (!r?.ok) { setWbNote((tip || '改') + '失败：' + (r?.error || '')); return }
+            if (!r?.ok) { setWbNote((tip || '改') + '失败：' + (r?.error || '')); return false }
             setWbNote(tip ? (tip + '已保存') : '')
             await refreshWb()
+            return true
+          })
+        }
+        function setWbDraft(index, displayPatch) {
+          const revisions = { ...(wbDraftRevisions.current[index] || {}) }
+          for (const field of Object.keys(displayPatch)) revisions[field] = (revisions[field] || 0) + 1
+          wbDraftRevisions.current[index] = revisions
+          setWbDrafts(current => ({ ...current, [index]: { ...(current[index] || {}), ...displayPatch } }))
+          return Object.fromEntries(Object.keys(displayPatch).map(field => [field, revisions[field]]))
+        }
+        function clearSavedDrafts(index, fields, sentRevisions) {
+          setWbDrafts(current => {
+            const next = { ...current }
+            const entry = { ...(next[index] || {}) }
+            const latestRevisions = wbDraftRevisions.current[index] || {}
+            for (const field of fields) if (latestRevisions[field] === sentRevisions[field]) delete entry[field]
+            if (Object.keys(entry).length) next[index] = entry
+            else delete next[index]
+            return next
+          })
+        }
+        function restorePending(entries, startAt) {
+          const restored = { ...wbPending.current }
+          for (const [rawIndex, patch] of entries.slice(startAt)) {
+            restored[rawIndex] = { ...patch, ...(restored[rawIndex] || {}) }
+          }
+          wbPending.current = restored
+        }
+        async function flushWbPending() {
+          if (wbTimer.current) { clearTimeout(wbTimer.current); wbTimer.current = null }
+          const batch = wbPending.current
+          wbPending.current = {}
+          const entries = Object.entries(batch)
+          for (let i = 0; i < entries.length; i++) {
+            const [rawIndex, patch] = entries[i]
+            const index = Number(rawIndex)
+            const sentRevisions = Object.fromEntries(Object.keys(patch).map(field => [field, wbDraftRevisions.current[index]?.[field]]))
+            let saved
+            try { saved = await sendEntryPatch(index, patch, false, '条目') }
+            catch (error) {
+              restorePending(entries, i)
+              setWbNote('保存失败：' + (error?.message ?? error))
+              return false
+            }
+            if (!saved) {
+              restorePending(entries, i)
+              return false
+            }
+            clearSavedDrafts(index, Object.keys(patch), sentRevisions)
+          }
+          return true
+        }
+        async function patchEntry(index, patch, remove, tip) {
+          try {
+            const sentRevisions = patch ? setWbDraft(index, patch) : {}
+            const flushed = await flushWbPending()
+            if (!flushed) {
+              if (patch) restorePending([[String(index), patch]], 0)
+              setWbNote('有未保存的输入，请检查网络后重试')
+              return
+            }
+            const saved = await sendEntryPatch(index, patch, remove, tip)
+            if (saved && patch) clearSavedDrafts(index, Object.keys(patch), sentRevisions)
+            else if (!saved && patch) restorePending([[String(index), patch]], 0)
           } catch (e) { setWbNote((tip || '改') + '失败：' + (e?.message ?? e)) }
         }
-        /** 打字时用这个：停 700ms 才真正提交，避免每敲一个字写一次盘。 */
-        function patchEntrySoon(index, patch, tip) {
+        /** 打字时保留本地值；停 700ms 后合并提交，避免丢掉相邻字段的改动。 */
+        function patchEntrySoon(index, patch, tip, displayPatch = patch) {
+          setWbDraft(index, displayPatch)
+          wbPending.current[index] = { ...(wbPending.current[index] || {}), ...patch }
           setWbNote('输入中…')
           if (wbTimer.current) clearTimeout(wbTimer.current)
-          const seq = ++wbSeq.current
           wbTimer.current = setTimeout(() => {
-            if (seq !== wbSeq.current) return
-            patchEntry(index, patch, false, tip)
+            wbTimer.current = null
+            flushWbPending().catch(e => setWbNote('保存失败：' + (e?.message ?? e)))
           }, 700)
+        }
+        function keywordValues(entry) {
+          return Array.isArray(entry.keywords) ? entry.keywords : []
+        }
+        function backendValues(entry) {
+          const draft = wbDrafts[entry.index]?.backends
+          return Array.isArray(draft) ? draft : Array.isArray(entry.backends) ? entry.backends : []
+        }
+        function diagnosticText(value) {
+          if (typeof value === 'string') return value
+          if (value && typeof value === 'object') {
+            const reasons = {
+              always: '常驻规则', 'keyword-match': '正文命中关键词', 'keyword-miss': '正文未命中关键词',
+              'empty-keywords': '未设置关键词', 'empty-content': '条目内容为空', disabled: '条目已停用', 'backend-mismatch': '不适用于当前渠道',
+              'not-selected': '本次规划未选择', 'name-match': '正文提及角色',
+              'fallback-no-name-match': '没有匹配到角色名称，使用角色回退列表', 'not-mentioned': '正文未提及角色',
+            }
+            const label = value.name || value.label || value.id || ''
+            const reason = reasons[value.reason] || value.reason || ''
+            return [label, reason].filter(Boolean).join(' — ') || '无名称记录'
+          }
+          return String(value ?? '')
         }
         async function addEntry() {
           try {
@@ -3569,16 +3832,32 @@ function versionsOf(jobId) {
           reader.readAsText(file)
         }
         async function exportWb() {
-          const r = await jsonFetch(BASE + '/worldbook-export', { cache: 'no-store' }).catch(() => null)
-          if (!r?.ok) { setWbNote('导出失败'); return }
+          const r = await jsonFetch(BASE + '/worldbook-export', { cache: 'no-store' }).catch(error => ({ ok: false, error: String(error?.message ?? error) }))
+          if (!r?.ok) { setWbNote('导出失败：' + (r?.error || '无法从服务器读取世界书，请检查插件连接后重试')); return }
           const text = JSON.stringify(r.worldbook, null, 2)
           try {
+            if (!navigator.clipboard?.writeText) throw new Error('浏览器未开放剪贴板权限')
             await navigator.clipboard.writeText(text)
+            setWbNote('✓ 世界书 JSON 已复制到剪贴板')
             if (typeof showToast === 'function') showToast('世界书 JSON 已复制到剪贴板，粘给别人就能导入')
-          } catch {
+          } catch (error) {
             setWbPaste(text)
             setWbImportOpen(true)
-            setWbNote('复制失败，内容已放到下面的框里，手动复制即可')
+            try {
+              const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+              const url = URL.createObjectURL(blob)
+              const link = document.createElement('a')
+              link.href = url
+              link.download = 'worldbook-export.json'
+              document.body.appendChild(link)
+              link.click()
+              link.remove()
+              setTimeout(() => URL.revokeObjectURL(url), 1000)
+              setWbNote('剪贴板不可用，已下载 JSON；内容也放在下方文本框，可手动复制。')
+            } catch {
+              setWbNote('剪贴板不可用；内容已放到下方文本框，请手动复制。')
+            }
+            if (typeof showToast === 'function') showToast('剪贴板不可用，已准备世界书 JSON 下载与手动复制内容')
           }
         }
 
@@ -3588,7 +3867,9 @@ function versionsOf(jobId) {
           h('div', { style: { fontSize: '13px', marginBottom: '4px' } },
             '生图世界书' + (data.worldbookName ? '《' + data.worldbookName + '》' : '') + '（' + onCount + ' / ' + list.length + ' 条启用）'),
           h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '10px' } },
-            '这几条会作为「画图规则」发给规划模型。可以自己导入世界书、逐条开关、改内容。'),
+            '启用的常驻条目会作为画图规则发送给规划模型；关键词条目仅在正文命中关键词时发送。旧条目默认常驻。可逐条调整触发方式和适用渠道。'),
+          h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '10px' } },
+            '固定规则会前置，方便服务端复用；规划仍通过 DSH 模型接口完成。'),
           h('div', { style: S.row },
             h('button', { style: buttonStyle, onClick: () => setWbImportOpen(v => !v) }, wbImportOpen ? '✖ 收起导入' : '📥 导入世界书'),
             h('button', { style: buttonStyle, onClick: addEntry }, '➕ 新条目'),
@@ -3632,19 +3913,58 @@ function versionsOf(jobId) {
               ),
               wbEditing === entry.index ? h('div', { style: { marginTop: '8px' } },
                 h('input', {
-                  type: 'text', value: entry.comment || '', placeholder: '条目标题',
+                  type: 'text', value: wbDrafts[entry.index]?.comment ?? entry.comment ?? '', placeholder: '条目标题',
                   style: Object.assign({}, S.input, { width: '100%', marginBottom: '6px' }),
                   onChange: e => patchEntrySoon(entry.index, { comment: e.target.value }, '标题'),
                 }),
                 h('textarea', {
-                  value: entry.content || '', placeholder: '条目内容（作为画图规则发给模型）',
+                  value: wbDrafts[entry.index]?.content ?? entry.content ?? '', placeholder: '条目内容（作为画图规则发给模型）',
                   style: ta,
                   onChange: e => patchEntrySoon(entry.index, { content: e.target.value }, '内容'),
                 }),
+                h('div', { style: { marginTop: '10px', padding: '9px', borderRadius: '8px', background: 'rgba(255,255,255,.025)', border: '1px solid rgba(120,140,170,.16)' } },
+                  h('div', { style: { fontSize: '12px', marginBottom: '6px' } }, '触发方式'),
+                  h('label', { style: Object.assign({}, S.row, { fontSize: '12px', marginBottom: '6px' }) },
+                    h('input', { type: 'radio', name: 'wb-activation-' + entry.index, value: 'always', checked: (wbDrafts[entry.index]?.activation ?? entry.activation ?? 'always') === 'always', onChange: () => patchEntry(entry.index, { activation: 'always' }, false, '触发方式') }),
+                    '常驻：每轮都作为画图规则发送'),
+                  h('label', { style: Object.assign({}, S.row, { fontSize: '12px' }) },
+                    h('input', { type: 'radio', name: 'wb-activation-' + entry.index, value: 'keywords', checked: (wbDrafts[entry.index]?.activation ?? entry.activation) === 'keywords', onChange: () => patchEntry(entry.index, { activation: 'keywords' }, false, '触发方式') }),
+                    '关键词触发：正文命中下方任一词时发送'),
+                  (wbDrafts[entry.index]?.activation ?? entry.activation) === 'keywords' ? h('div', { style: { marginTop: '6px' } },
+                    h('textarea', { 'aria-label': '触发关键词 ' + entry.index, value: wbDrafts[entry.index]?.keywords ?? keywordValues(entry).join('，'), placeholder: '例如：雨夜，咖啡馆（逗号、中文逗号或换行分隔）', style: Object.assign({}, ta, { minHeight: '54px' }), onChange: e => patchEntrySoon(entry.index, { keywords: e.target.value.split(/[，,\n\r]+/).map(value => value.trim()).filter(Boolean) }, '关键词', { keywords: e.target.value }) }),
+                    (wbDrafts[entry.index]?.keywords ?? keywordValues(entry).join('，')).split(/[，,\n\r]+/).map(value => value.trim()).filter(Boolean).length === 0 ? h('div', { role: 'alert', style: { color: '#f2a36b', fontSize: '11px', marginTop: '4px' } }, '没有关键词：此条目不会注入。请填写至少一个词，或改为常驻。') : null,
+                  ) : null,
+                  h('div', { style: { fontSize: '12px', margin: '10px 0 4px' } }, '适用生图渠道'),
+                  h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '5px' } }, '未勾选任何渠道表示全部渠道。'),
+                  h('div', { style: Object.assign({}, S.row, { gap: '8px 14px' }) }, providers.map(([id, label]) => h('label', { key: id, style: { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px' } },
+                    h('input', { type: 'checkbox', checked: backendValues(entry).includes(id), onChange: e => {
+                      const next = new Set(backendValues(entry))
+                      if (e.target.checked) next.add(id); else next.delete(id)
+                      const backends = [...next]
+                      patchEntry(entry.index, { backends }, false, '适用渠道')
+                    } }), label))),
+                ),
                 h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '4px' } }, '改动即时保存。'),
               ) : null,
             )) : h('div', { style: { fontSize: '12px', color: '#9aa3b2', padding: '12px' } },
               '还没有条目。可以点「📥 导入世界书」，或「➕ 新条目」自己写。'),
+          ),
+          h('details', { style: { marginTop: '14px', borderTop: '1px solid rgba(120,140,170,.2)', paddingTop: '10px' } },
+            h('summary', { style: { cursor: 'pointer', fontSize: '12px', color: '#b8c5d3' } }, '上次规划的诊断'),
+            context ? h('div', { style: { marginTop: '8px', fontSize: '11px', color: '#b8c5d3', lineHeight: 1.6 } },
+              h('div', { style: { marginBottom: '8px' } }, '轮次 ' + (context.turn ?? '—') + ' · 渠道 ' + (providers.find(([id]) => id === context.backend)?.[1] || context.backend || '—') + ' · 时间 ' + (context.at || '—')),
+              h('div', {}, '字符统计：固定 ' + (context.staticChars ?? '—') + ' · 动态 ' + (context.dynamicChars ?? '—') + ' · 正文 ' + (context.bodyChars ?? '—')),
+              h('div', { style: { marginTop: '8px' } }, '已纳入条目'),
+              Array.isArray(context.includedEntries) && context.includedEntries.length ? context.includedEntries.map((item, i) => h('div', { key: 'included-' + i },
+                '第 ' + ((item.index ?? 0) + 1) + ' 条 · ' + (item.comment || '未命名') + (item.reason ? ' — ' + diagnosticText({ reason: item.reason }) : '')))
+                : h('div', {}, '本轮没有纳入条目。'),
+              h('div', { style: { marginTop: '8px' } }, '未纳入条目'),
+              Array.isArray(context.omittedEntries) && context.omittedEntries.length ? context.omittedEntries.map((item, i) => h('div', { key: 'omitted-' + i },
+                '第 ' + ((item.index ?? 0) + 1) + ' 条 · ' + (item.comment || '未命名') + (item.reason ? ' — ' + diagnosticText({ reason: item.reason }) : '')))
+                : h('div', {}, '没有未纳入条目。'),
+              h('div', { style: { marginTop: '8px' } }, '本轮识别角色'),
+              Array.isArray(context.includedCharacters) && context.includedCharacters.length ? context.includedCharacters.map((item, i) => h('div', { key: 'character-' + i }, diagnosticText(item))) : h('div', {}, '无角色。'),
+            ) : h('div', { style: { marginTop: '8px', fontSize: '11px', color: '#9aa3b2' } }, '暂无诊断记录。完成一轮规划后，这里会显示实际纳入和排除的规则及原因。'),
           ),
         )
       }
@@ -3790,7 +4110,6 @@ function versionsOf(jobId) {
         const r = await post('/llm-models', { provider, model }).catch(() => null)
         if (r?.reasoning) setLlmReasoning(m => Object.assign({}, m, { [key]: r.reasoning }))
       }
-
       /**
        * 模型选择器：provider 下拉 → model 下拉 → 推理等级下拉。
        * onlyVision=true 时只列能看图的模型（看图模型用）。
@@ -3803,7 +4122,7 @@ function versionsOf(jobId) {
         const models = (llmModels[pv] || []).filter(m => !onlyVision || m.vision)
         const reason = llmReasoning[pv + '/' + md]
         const optStyle = { color: '#12161c', background: '#e9eef6' }
-        const set = (patch) => setData(Object.assign({}, data, { config: Object.assign({}, config, patch) }))
+        const set = (patch) => setData(current => Object.assign({}, current, { config: Object.assign({}, current?.config || {}, patch) }))
         return h('div', { style: { marginBottom: '8px' } },
           h('div', { style: S.row },
             h('span', { style: Object.assign({}, S.label, { minWidth: '86px' }) }, label),
@@ -4096,6 +4415,53 @@ function versionsOf(jobId) {
         const canUpdate = supported && pluginUpdateCheck?.available === true && pluginUpdateCheck?.canUpdate === true && !restartNeeded
         const latestConfirmed = pluginUpdateCheck?.available === false && pluginUpdateCheck?.restartRequired !== true && pluginUpdateCheck?.supported !== false && pluginUpdateLocal?.supported !== false && !pluginUpdateCheck?.reason && !pluginUpdateLocal?.reason
         const migrationNeeded = pluginUpdateLocal?.directoryMigrationRequired === true && pluginUpdateLocal?.supported !== false
+        const downloads = data.pluginDownloads && typeof data.pluginDownloads === 'object' ? data.pluginDownloads : {}
+        const externalDownload = (key, hostname, pathname) => {
+          try {
+            const url = new URL(String(downloads[key] ?? ''))
+            if (url.protocol !== 'https:' || url.hostname !== hostname || url.port || url.username || url.password || url.search || url.hash || url.pathname !== pathname) return ''
+            return url.href
+          } catch { return '' }
+        }
+        const localDownloadPath = (() => {
+          try {
+            const value = String(downloads.local ?? '')
+            if (!value.startsWith('/') || value.startsWith('//')) return ''
+            const url = new URL(value, window.location.origin)
+            const validPath = ['/plugins/dsh-tavern-image/plugin-download', '/plugins/dsh-tavern-comfy/plugin-download'].includes(url.pathname)
+            return url.origin === window.location.origin && validPath && !url.username && !url.password && !url.search && !url.hash ? url.pathname : ''
+          } catch { return '' }
+        })()
+        const sourceUrl = externalDownload('source', 'github.com', '/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip')
+        const alternateUrl = externalDownload('alternate', 'codeload.github.com', '/weixinlll/dsh-tavern-image/zip/refs/heads/master')
+        const releasesUrl = externalDownload('releases', 'github.com', '/weixinlll/dsh-tavern-image/releases')
+        const repositoryUrl = externalDownload('repository', 'github.com', '/weixinlll/dsh-tavern-image.git')
+        async function downloadLocalPackage() {
+          if (!localDownloadPath) return
+          setPluginUpdateNote('正在生成本机安装包…')
+          try {
+            const response = await fetch(localDownloadPath, { method: 'GET', credentials: 'same-origin', cache: 'no-store' })
+            if (!response.ok) {
+              let detail = ''
+              try { detail = (await response.json())?.error || '' } catch {}
+              throw new Error(detail || ('HTTP ' + response.status))
+            }
+            const type = String(response.headers.get('content-type') || '').toLowerCase()
+            if (!type.includes('application/zip')) throw new Error('服务没有返回 ZIP 安装包')
+            const blobUrl = URL.createObjectURL(await response.blob())
+            const anchor = document.createElement('a')
+            anchor.href = blobUrl
+            anchor.download = 'dsh-tavern-image-local.zip'
+            document.body.appendChild(anchor)
+            anchor.click()
+            anchor.remove()
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+            setPluginUpdateNote('✓ 本机安装包已开始下载。它包含当前本机插件代码和测试改动。')
+          } catch (error) {
+            setPluginUpdateNote('本机安装包下载失败：' + String(error?.message ?? error))
+          }
+        }
+        const linkStyle = Object.assign({}, buttonStyle, { display: 'inline-block', textDecoration: 'none' })
         return h('div', null,
           h('div', { style: S.card },
             h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '8px' } }, '插件更新'),
@@ -4104,7 +4470,7 @@ function versionsOf(jobId) {
               h('span', { style: S.label }, '远端版本'), h('span', null, version(pluginUpdateCheck?.latestVersion)),
             ),
             latestConfirmed ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px' } }, '当前已是最新版本。') : null,
-            pluginUpdateLocal?.supported === false ? h('a', { href: 'https://github.com/weixinlll/dsh-tavern-image', target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
+            pluginUpdateLocal?.supported === false && repositoryUrl ? h('a', { href: repositoryUrl.slice(0, -4), target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
             h('div', { style: S.row },
               h('button', { style: buttonStyle, disabled: !supported || Boolean(pluginUpdatePending), onClick: () => { setPluginUpdateCheck(null); void checkPluginUpdate() } }, pluginUpdatePending === 'check' ? '正在检查…' : '检查更新'),
               h('button', { style: buttonStyle, disabled: !canUpdate || Boolean(pluginUpdatePending), onClick: applyPluginUpdate }, pluginUpdatePending === 'apply' ? '正在更新…' : '更新插件'),
@@ -4115,6 +4481,17 @@ function versionsOf(jobId) {
             ),
             migrationNeeded ? h('div', { role: 'note', style: { fontSize: '12px', color: '#f0b45c', marginTop: '8px', lineHeight: 1.55 } }, pluginUpdateLocal.directoryMigrationMessage) : null,
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } }, '只更新插件代码；配置和人物库会保留。更新完成后请完整重启 DSH 才会生效。'),
+            h('div', { style: { borderTop: '1px solid rgba(120,140,170,.2)', marginTop: '12px', paddingTop: '10px' } },
+              h('div', { style: { fontSize: '12px', color: '#dfe4ec', marginBottom: '6px' } }, '手动下载插件包'),
+              h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '9px', lineHeight: 1.55 } }, '本机安装包包含当前本机代码（包括未发布测试改动）；GitHub ZIP 与备用下载是公开仓库 master 版本，不包含本机测试改动。若公开 ZIP 下载较慢，可试备用下载；它也由 GitHub codeload 提供。历史发布可选稳定版本。'),
+              h('div', { style: S.row },
+                h('button', { type: 'button', style: buttonStyle, disabled: !localDownloadPath, onClick: downloadLocalPackage }, '本机安装包'),
+                sourceUrl ? h('a', { href: sourceUrl, target: '_blank', rel: 'noopener noreferrer', style: linkStyle }, 'GitHub 源码ZIP') : null,
+                alternateUrl ? h('a', { href: alternateUrl, target: '_blank', rel: 'noopener noreferrer', style: linkStyle }, '备用下载') : null,
+                releasesUrl ? h('a', { href: releasesUrl, target: '_blank', rel: 'noopener noreferrer', style: linkStyle }, '历史发布') : null,
+              ),
+              !localDownloadPath && !sourceUrl && !alternateUrl && !releasesUrl ? h('div', { role: 'status', style: { fontSize: '11px', color: '#f0b45c', marginTop: '6px' } }, '下载地址尚不可用，请刷新控制台状态后重试。') : null,
+            ),
           ),
         )
       }
@@ -4505,7 +4882,9 @@ function versionsOf(jobId) {
           // 给自己的媒体类型定显示方式：大图 + 点开放大 + 右键/长按改提示词重画
           for (const mediaKind of ['dsh-tavern-image/image', 'dsh-tavern-comfy/image']) {
             try {
-              const offMedia = ui.registerMediaRenderer(mediaKind, args => h(OfficialImage, { item: args && args.item }))
+              const offMedia = ui.registerMediaRenderer(mediaKind, args => h(OfficialImage, {
+                item: args && args.item, gameId: args && args.gameId, turn: args && args.turn,
+              }))
               owner.effect?.(() => offMedia, 'dsh-tavern-image: media renderer ' + mediaKind)
               reportHost('tavernui-media-registered', { ok: true, mediaKind })
             } catch (error) {
@@ -4526,7 +4905,7 @@ function versionsOf(jobId) {
 
     exports.name = 'dsh-tavern-image'
     exports.inject = ['slots']
-    exports.apply = apply
+    exports.apply = apply; exports.__test = Object.assign(exports.__test || {}, { OfficialImage, PromptEditor, validMediaContext, setToastForTest: fn => { showToast = fn }, hasUncertainMediaAction: mediaId => mediaUncertainActions.has(String(mediaId)) })
     return module.exports
   },
 })
