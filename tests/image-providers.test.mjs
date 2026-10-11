@@ -215,3 +215,53 @@ test('abort signal stops a pending provider request', async () => {
   controller.abort()
   await assert.rejects(pending)
 })
+
+test('lost generation responses and image downloads are uncertain, never automatically repeated', async () => {
+  for (const mode of ['network', 'server', 'download']) {
+    const { fetchImpl, calls } = mockFetch((_url, _init, n) => {
+      if (mode === 'server') return new Response('upstream unavailable', { status: 502 })
+      if (mode === 'download' && n === 1) return json({ data: [{ url: 'https://cdn.test/result.png' }] })
+      throw new Error('connection lost')
+    })
+    await assert.rejects(generateImage(channel('openai'), request, { fetchImpl }), error => error.requestMayHaveSucceeded === true)
+    assert.equal(calls.filter(call => call.method === 'POST').length, 1)
+  }
+})
+
+test('explicit platform rejection and pre-submission validation do not imply a paid task', async () => {
+  const denied = mockFetch(() => new Response('not authorized', { status: 401 }))
+  await assert.rejects(generateImage(channel('openai'), request, { fetchImpl: denied.fetchImpl }), error => error.requestMayHaveSucceeded === false)
+  const invalid = mockFetch(() => { throw new Error('must not fetch') })
+  await assert.rejects(generateImage(channel('openai', { options: { generatePath: '//other.test/generate' } }), request, { fetchImpl: invalid.fetchImpl }), error => error.requestMayHaveSucceeded === false)
+  assert.equal(invalid.calls.length, 0)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(generateImage(channel('openai'), request, { fetchImpl: invalid.fetchImpl, signal: controller.signal }), error => error.requestMayHaveSucceeded === false)
+  assert.equal(invalid.calls.length, 0)
+})
+
+test('Qwen acknowledges the task before polling and resumes the same task without POST', async () => {
+  const observed = []
+  const lost = mockFetch((_url, _init, n) => {
+    if (n === 1) return json({ output: { task_id: 'task-recover', task_status: 'PENDING' } })
+    assert.deepEqual(observed, [{ provider: 'qwen', taskId: 'task-recover' }])
+    throw new Error('poll connection lost')
+  })
+  const settings = channel('qwen', { options: { apiMode: 'async', pollIntervalMs: 1 } })
+  await assert.rejects(generateImage(settings, request, { fetchImpl: lost.fetchImpl, onTask: value => observed.push(value) }), error => error.requestMayHaveSucceeded === true)
+  const recovered = mockFetch((_url, _init, n) => n === 1
+    ? json({ output: { task_status: 'SUCCEEDED', results: [{ url: 'https://cdn.test/recovered.png' }] } }) : image(png))
+  const result = await generateImage(settings, request, { fetchImpl: recovered.fetchImpl, resumeTaskId: observed[0].taskId })
+  assert.deepEqual(result.bytes, png)
+  assert.ok(recovered.calls.every(call => call.method === 'GET'))
+  assert.match(recovered.calls[0].url, /\/tasks\/task-recover$/)
+})
+
+test('Qwen confirmed task failure can be retried, but an invalid resume id never sends a request', async () => {
+  const rejected = mockFetch(() => json({ output: { task_status: 'FAILED', message: 'model rejected prompt' } }))
+  await assert.rejects(generateImage(channel('qwen', { options: { pollIntervalMs: 1 } }), request, { fetchImpl: rejected.fetchImpl, resumeTaskId: 'task-failed' }), error => error.requestMayHaveSucceeded === false)
+  assert.equal(rejected.calls.length, 1)
+  assert.equal(rejected.calls[0].method, 'GET')
+  await assert.rejects(generateImage(channel('qwen'), request, { fetchImpl: rejected.fetchImpl, resumeTaskId: '../foreign' }), /任务编号/)
+  assert.equal(rejected.calls.length, 1)
+})

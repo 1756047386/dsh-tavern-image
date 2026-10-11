@@ -13,6 +13,11 @@ const require = createRequire(import.meta.url)
 const PNG = require('../lib/vendor/pngjs/lib/png.js').PNG
 const block = (tag, anchor = tag) => `<image><regex>${anchor}</regex><title>画面</title><prompts>${tag}</prompts></image>`
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+async function untilRuntime(predicate, timeout = 1000) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) { if (await predicate()) return; await delay(5) }
+  assert.fail('runtime condition timed out')
+}
 
 // Load the actual host implementation in an isolated plugin directory so routes,
 // persistence and workflow compilation run without changing installed user data.
@@ -34,11 +39,13 @@ async function runtime(t, stream, definitions = {}, options = {}) {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (input, init) => {
     const url = new URL(input)
-    if (options.fetch && url.hostname === 'image.test') return options.fetch(input, init)
+    if (options.objectInfo && url.pathname === '/object_info') return new Response(JSON.stringify(options.objectInfo))
+    if (options.fetch && (url.hostname === 'image.test' || options.fetchHosts?.includes(url.hostname))) return options.fetch(input, init)
     if (url.pathname === '/prompt') {
       const prompt = JSON.parse(init.body).prompt
       submitted.push(prompt['1'].inputs.text)
       events.push('submit:' + submitted.length); firstPrompt.resolve()
+      if (options.comfyPrompt) await options.comfyPrompt(prompt, { events, submitted })
       return new Response(JSON.stringify({ prompt_id: 'comfy-' + submitted.length }), { status: 200 })
     }
     return new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), { status: 200 })
@@ -59,8 +66,9 @@ async function runtime(t, stream, definitions = {}, options = {}) {
     for (let i = 0; i < 100 && !options.tavern.bridgeReady; i++) await delay(5)
     assert.equal(options.tavern.bridgeReady, true, 'Tavern bridge should register through the official API')
   }
+  const disposePlugin = () => { for (const dispose of disposes.splice(0).reverse()) dispose() }
   t.after(async () => {
-    for (const dispose of disposes.reverse()) dispose()
+    disposePlugin()
     globalThis.fetch = originalFetch
     // Pending atomic saves finish before removing this verified temporary fixture.
     await delay(40)
@@ -80,7 +88,7 @@ async function runtime(t, stream, definitions = {}, options = {}) {
       routes.get(req.url.split('?')[0])(req, response)
     })
   }
-  return { request, events, submitted, firstPrompt, root, pluginName: name }
+  return { request, events, submitted, firstPrompt, root, pluginName: name, disposePlugin }
 }
 
 test('host starts the first complete image while the planner stream is still open; duplicate/extra blocks stay capped', async t => {
@@ -96,7 +104,7 @@ test('host starts the first complete image while the planner stream is still ope
     yield { type: 'text-delta', text: block('first', 'first') + block('second') + block('third') }
     state.events.push('stream-finished')
   })
-  const request = f.request('plan', { text: '正文', messageId: 'message-1', sessionId: 'game', count: 2, manual: true })
+  const request = f.request('plan', { text: 'first second', messageId: 'message-1', sessionId: 'game', count: 2, manual: true })
   await f.firstPrompt.promise
   await delay(5)
   assert.deepEqual(f.events.slice(0, 2), ['submit:1', 'stream-still-open'])
@@ -121,14 +129,14 @@ test('new API paths are canonical while old paths remain available for existing 
   assert.equal(legacy.status, 200)
 })
 
-test('a stream error preserves complete submitted images, marks the plan failed, and allows retry without duplicate GPU jobs', async t => {
+test('an automatic stream retry preserves complete submitted images without duplicate GPU jobs', async t => {
   let calls = 0
   const f = await runtime(t, async function* () {
     yield { type: 'text-delta', text: block('first') }
     if (++calls === 1) throw new Error('temporary stream failure')
     yield { type: 'text-delta', text: block('second') }
   })
-  const input = { text: '正文', messageId: 'retry-message', manual: true }
+  const input = { text: 'first second', messageId: 'retry-message' }
   const failed = await f.request('plan', input)
   assert.equal(failed.body.plans.length, 1)
   assert.match(failed.body.error, /temporary stream failure/)
@@ -136,6 +144,19 @@ test('a stream error preserves complete submitted images, marks the plan failed,
   assert.equal(retried.body.error, null)
   assert.equal(retried.body.plans.length, 2)
   assert.deepEqual(f.submitted, ['first', 'second'])
+})
+
+test('manual generation of the same prompt starts a fresh job instead of reusing the previous image', async t => {
+  const f = await runtime(t, async function* () {
+    yield { type: 'text-delta', text: block('same prompt', '正文') }
+  })
+  const input = { text: '正文', messageId: 'manual-redraw', manual: true }
+  const first = await f.request('plan', input)
+  const second = await f.request('plan', input)
+  assert.equal(first.body.error, null)
+  assert.equal(second.body.error, null)
+  assert.notEqual(first.body.plans[0].jobId, second.body.plans[0].jobId)
+  assert.deepEqual(f.submitted, ['same prompt', 'same prompt'])
 })
 
 test('empty or incomplete output reports a retryable planning error with no GPU submission', async t => {
@@ -264,59 +285,272 @@ test('missing story history output is saved with a visible warning', async t => 
   assert.match(history.body.snapshot.warning, /缺少角色更新块/)
 })
 
-test('smart auto waits for one final decision before submitting or attaching images', async t => {
+test('attach-turn waits for official getTurn data and coalesces with settled auto planning', async t => {
+  const turn = { gameId: 'wait-auto', turn: 1, textVersion: 'wait-v1', text: 'A complete settled scene.' }
+  let available = false, settled, plannerCalls = 0, paidCalls = 0
+  const media = []
+  const tavern = {
+    apiVersion: 2, promptSection() { return () => {} },
+    onTurnSettled(handler) { settled = handler; this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { return available ? turn : null }, async list() { return media },
+    async readTurnData() { return null }, async saveTurnData() {},
+    async attach({ item, textVersion }) { const row = { ...item, id: 'media-' + media.length, textVersion }; media.push(row); return { id: row.id } },
+    async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) },
+    async remove(id) { const index = media.findIndex(item => item.id === id); if (index >= 0) media.splice(index, 1) },
+  }
+  const f = await runtime(t, async function* () {
+    plannerCalls++
+    yield { type: 'text-delta', text: block('settled scene') }
+  }, {}, {
+    tavern, attachments: { async saveImage() { return { id: 'attachment' } } },
+    config: { ...imageConfig, autoImageGen: true, smartImageSelection: false, characterAutoUpdate: false },
+    fetch: async () => { paidCalls++; return Response.json({ data: [{ b64_json: png }] }) },
+  })
+  const manualRequest = f.request('attach-turn', { gameId: turn.gameId, turn: turn.turn })
+  const duplicateRequest = f.request('attach-turn', { gameId: turn.gameId, turn: turn.turn })
+  await delay(40)
+  available = true
+  settled(turn)
+  const [result, duplicateResult] = await Promise.all([manualRequest, duplicateRequest])
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  assert.equal(duplicateResult.body.ok, true)
+  await untilRuntime(() => media.some(item => item.status === 'ready'))
+  assert.equal(plannerCalls, 1, 'the waiting button joins the auto plan for this exact version')
+  assert.equal(paidCalls, 1, 'the same version is submitted only once')
+  assert.equal(media.length, 1)
+})
+
+test('attach-turn waiting remains a manual draw when automatic planning is disabled', async t => {
+  const turn = { gameId: 'wait-manual', turn: 1, textVersion: 'manual-v1', text: 'A complete scene.' }
+  let available = false, plannerCalls = 0, paidCalls = 0
+  const media = []
+  const tavern = {
+    apiVersion: 2, promptSection() { return () => {} },
+    onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { return available ? turn : null }, async list() { return media },
+    async readTurnData() { return null }, async saveTurnData() {},
+    async attach({ item, textVersion }) { const row = { ...item, id: 'media-' + media.length, textVersion }; media.push(row); return { id: row.id } },
+    async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) },
+    async remove(id) { const index = media.findIndex(item => item.id === id); if (index >= 0) media.splice(index, 1) },
+  }
+  const f = await runtime(t, async function* () {
+    plannerCalls++
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>manual redraw</reason>' + block('manual settled scene', turn.text) }
+  }, {}, {
+    tavern, attachments: { async saveImage() { return { id: 'attachment' } } },
+    config: { ...imageConfig, autoImageGen: false, plannerEnabled: false, characterAutoUpdate: false },
+    fetch: async () => { paidCalls++; return Response.json({ data: [{ b64_json: png }] }) },
+  })
+  const manualRequest = f.request('attach-turn', { gameId: turn.gameId, turn: turn.turn })
+  await delay(50)
+  available = true
+  const result = await manualRequest
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  assert.equal(result.body.attached, 1, JSON.stringify(result.body))
+  assert.equal(plannerCalls, 1, 'manual mode still invokes the planner when history-only mode is configured')
+  await untilRuntime(() => paidCalls === 1)
+  assert.equal(media.length, 1)
+})
+
+test('disposing the plugin aborts a pending official getTurn wait', async t => {
+  let getTurnCalls = 0
+  const tavern = {
+    apiVersion: 2, promptSection() { return () => {} },
+    onTurnSettled() { this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { getTurnCalls++; return null }, async list() { return [] },
+    async attach() { throw new Error('unavailable turn must never attach') },
+    async readTurnData() { return null }, async saveTurnData() {},
+  }
+  const f = await runtime(t, async function* () {}, {}, { tavern, attachments: { async saveImage() { return { id: 'unused' } } } })
+  const pending = f.request('attach-turn', { gameId: 'dispose-wait', turn: 1 })
+  await untilRuntime(() => getTurnCalls > 0)
+  await delay(20)
+  f.disposePlugin()
+  const result = await pending
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  assert.equal(result.body.attached, 0)
+  assert.match(result.body.error, /插件已卸载/)
+  assert.equal(getTurnCalls, 1, 'abort prevents later polling calls')
+})
+
+test('smart auto pays and attaches the first image before the planner stream ends', async t => {
   const turn = { gameId: 'smart-game', turn: 1, textVersion: 'smart-v1', text: 'A dramatic scene.' }
   const media = []
-  let settled, saved = false
+  let settled
   const tavern = {
     apiVersion: 2,
     promptSection() { return () => {} }, onTurnSettled(handler) { settled = handler; this.bridgeReady = true; return () => {} },
     onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
     async getTurn() { return turn }, async list() { return media },
-    async readTurnData() { return null }, async saveTurnData() { saved = true },
+    async readTurnData() { return null }, async saveTurnData() {},
     async attach({ item, textVersion }) { const row = { ...item, id: 'media-' + media.length, textVersion }; media.push(row); return { id: row.id } },
     async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) },
     async remove(id) { const index = media.findIndex(item => item.id === id); if (index >= 0) media.splice(index, 1) },
   }
   let paidCalls = 0
+  const keepOpen = deferred()
   const f = await runtime(t, async function* () {
-    yield { type: 'text-delta', text: '<decision>draw</decision><reason>first choice</reason>' + block('should never be submitted') }
-    yield { type: 'text-delta', text: '<decision>skip</decision><reason>conflicting final choice</reason>' }
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>first choice</reason>' + block('dramatic') }
+    await keepOpen.promise
   }, {}, {
-    tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: imageConfig,
+    tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: false },
     fetch: async () => { paidCalls++; return Response.json({ data: [{ b64_json: png }] }) },
   })
+  turn.text = 'A dramatic scene.'
   settled(turn)
-  for (let i = 0; i < 100 && !saved; i++) await delay(10)
+  await delay(80)
+  assert.equal(paidCalls, 1)
+  assert.equal(media.length, 1, 'first image should be attached while the LLM stream remains open')
+  keepOpen.resolve()
   await delay(20)
-  assert.equal(saved, true)
-  assert.equal(paidCalls, 0)
-  assert.equal(media.length, 0)
-  assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0)
+  assert.equal(paidCalls, 1)
+  assert.equal(media.length, 1)
+  assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 1)
 })
 
-test('smart draw text followed by an LLM finish error creates no image jobs', async t => {
+test('smart stream error after first image preserves its paid job and reports failure', async t => {
   const turn = { gameId: 'smart-error-game', turn: 1, textVersion: 'smart-error-v1', text: 'A dramatic scene.' }
-  let settled, saved = false, paidCalls = 0
+  let settled, paidCalls = 0
   const tavern = {
     apiVersion: 2, promptSection() { return () => {} },
     onTurnSettled(handler) { settled = handler; this.bridgeReady = true; return () => {} },
     onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
     async getTurn() { return turn }, async list() { return [] }, async readTurnData() { return null },
-    async saveTurnData() { saved = true }, async attach() { throw new Error('must not attach') },
+    async saveTurnData() {}, async attach({ item }) { return { id: item.jobId } },
   }
   const f = await runtime(t, async function* () {
-    yield { type: 'text-delta', text: '<decision>draw</decision><reason>promising scene</reason>' + block('must not be submitted') }
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>promising scene</reason>' + block('dramatic') }
+    await delay(80)
     yield { type: 'finish', reason: { kind: 'error', failure: { message: 'planner stream failed' } } }
   }, {}, {
-    tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: imageConfig,
+    tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: false },
     fetch: async () => { paidCalls++; return Response.json({ data: [{ b64_json: png }] }) },
   })
   settled(turn)
-  for (let i = 0; i < 100 && !saved; i++) await delay(10)
   await delay(20)
-  assert.equal(saved, true)
-  assert.equal(paidCalls, 0)
+  assert.equal(paidCalls, 1)
+  assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 1)
+})
+
+test('a later unclosed duplicate decision stops later images and preserves the first', async t => {
+  const turn = { gameId: 'smart-queued-error', turn: 1, textVersion: 'v1', text: 'first second' }, media = []
+  let settled
+  const tavern = { apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { settled = handler; this.bridgeReady = true; return () => {} }, onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media }, async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {} }
+  const paidFirst = deferred()
+  const f = await runtime(t, async function* (_args, state) {
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>two distinct views</reason>' + block('first view', 'first') }
+    await paidFirst.promise
+    yield { type: 'text-delta', text: '<decision>' + block('second view', 'second') }
+  }, {}, { tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: false },
+    fetch: async () => { paidFirst.resolve(); return Response.json({ data: [{ b64_json: png }] }) } })
+  settled(turn)
+  await paidFirst.promise
+  await delay(100)
+  assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 1)
+  assert.equal(media.length, 1)
+})
+
+test('smart skip submits nothing and same-chunk duplicate decisions reject before payment', async t => {
+  let paid = 0
+  const fixture = async (text, stream, name) => {
+    const turn = { gameId: name, turn: 1, textVersion: '1', text }, media = []
+    const tavern = { apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} }, onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media }, async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {} }
+    const f = await runtime(t, stream, {}, { tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: false }, fetch: async () => { paid++; return Response.json({ data: [{ b64_json: png }] }) } })
+    tavern.settled(turn)
+    await delay(100)
+    return { f, media }
+  }
+  const { media: skipMedia } = await fixture('静态场景', async function* () {
+    yield { type: 'text-delta', text: '<decision>skip</decision><reason>静态场景</reason>' }
+  }, 'skip')
+  assert.equal(paid, 0)
+  assert.equal(skipMedia.length, 0)
+  const { f: conflict, media: conflictMedia } = await fixture('冲突测试', async function* () {
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>冲突测试</reason><decision>skip</decision>' + block('冲突') }
+  }, 'conflict')
+  assert.equal(paid, 0)
+  assert.equal(conflictMedia.length, 0)
+  assert.equal((await conflict.request('history', undefined, 'GET')).body.jobs.length, 0)
+})
+
+test('smart final-only output rejects images before decision/reason or story updates', async t => {
+  let paid = 0
+  for (const [name, output] of [
+    ['image-before-decision', block('too early') + '<decision>draw</decision><reason>later</reason>'],
+    ['image-before-reason', '<decision>draw</decision>' + block('too early') + '<reason>later</reason>'],
+    ['image-before-story', '<decision>draw</decision><reason>later</reason>' + block('too early') + '<character_updates>[]</character_updates>'],
+  ]) {
+    const turn = { gameId: name, turn: 1, textVersion: 'v1', text: 'a visual moment' }, media = []
+    const tavern = {
+      apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} },
+      onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media },
+      async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {},
+    }
+    const f = await runtime(t, async function* () { yield { type: 'text-delta', text: output } }, {}, {
+      tavern, attachments: { async saveImage() { return { id: 'unused' } } },
+      config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: name === 'image-before-story' },
+      fetch: async () => { paid++; return Response.json({ data: [{ b64_json: png }] }) },
+    })
+    tavern.settled(turn)
+    await delay(80)
+    assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0, name)
+    assert.equal(media.length, 0, name)
+  }
+  assert.equal(paid, 0)
+})
+
+test('smart streaming does not submit images nested in reason or preceding character updates', async t => {
+  let paid = 0
+  const outputs = [
+    '<decision>draw</decision><reason>explain ' + block('nested') + ' end</reason>' + block('after'),
+    '<decision>draw</decision><reason>reason</reason><character_updates>[]</character_updates>' + block('after'),
+  ]
+  for (let index = 0; index < outputs.length; index++) {
+    const turn = { gameId: 'stream-order-' + index, turn: 1, textVersion: 'v1', text: 'a visual moment' }, media = []
+    const tavern = { apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} }, onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media }, async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {} }
+    const f = await runtime(t, async function* () { yield { type: 'text-delta', text: outputs[index] } }, {}, {
+      tavern, attachments: { async saveImage() { return { id: 'unused' } } },
+      config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: true },
+      fetch: async () => { paid++; return Response.json({ data: [{ b64_json: png }] }) },
+    })
+    tavern.settled(turn)
+    await delay(90)
+    assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0)
+    assert.equal(media.length, 0)
+  }
+  assert.equal(paid, 0)
+})
+
+test('smart normalized duplicate prompts on different anchors are submitted once', async t => {
+  let paid = 0
+  const turn = { gameId: 'duplicate', turn: 1, textVersion: '1', text: 'first second' }, media = []
+  const tavern = { apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} }, onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media }, async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {} }
+  const f = await runtime(t, async function* () {
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>戏剧场景</reason>' + block('same,   prompt', 'first') + block('SAME, prompt', 'second') }
+  }, {}, { tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, autoImageGen: true, smartImageSelection: true, characterAutoUpdate: false }, fetch: async () => { paid++; return Response.json({ data: [{ b64_json: png }] }) } })
+  tavern.settled(turn)
+  await delay(100)
+  assert.equal(paid, 1)
+  assert.equal(media.length, 1)
+})
+
+test('history-only mode ignores accidental image blocks without paid jobs', async t => {
+  const turn = { gameId: 'history-only', turn: 1, textVersion: 'v1', text: 'a visual moment' }, media = []
+  const tavern = { apiVersion: 2, promptSection() { return () => {} }, onTurnSettled(handler) { this.settled = handler; this.bridgeReady = true; return () => {} }, onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} }, async getTurn() { return turn }, async list() { return media }, async readTurnData() { return null }, async saveTurnData() {}, async attach({ item }) { media.push(item); return { id: item.jobId } }, async update() {}, async remove() {} }
+  let paid = 0
+  const f = await runtime(t, async function* () {
+    yield { type: 'text-delta', text: '<decision>draw</decision><reason>误输出</reason><image><regex>a visual moment</regex><prompts>accidental image</prompts></image>' }
+  }, {}, { tavern, attachments: { async saveImage() { return { id: 'unused' } } }, config: { ...imageConfig, plannerEnabled: false, characterAutoUpdate: true }, fetch: async () => { paid++; return Response.json({ data: [{ b64_json: png }] }) } })
+  tavern.settled(turn)
+  await delay(120)
+  assert.equal(paid, 0)
+  assert.equal(media.length, 0)
   assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0)
 })
 
@@ -356,6 +590,31 @@ const imageChannel = { id: 'primary', provider: 'openai', name: '测试渠道', 
 const imageConfig = { imageBackend: 'openai', activeImageChannel: 'primary', imageChannels: [imageChannel], imageConcurrency: 1 }
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZkAAAAASUVORK5CYII='
 const pngBytes = PNG.sync.write({ width: 2, height: 2, data: Buffer.from([255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128]) })
+
+test('planned OpenAI images retain Chinese descriptions through the runtime provider request', async t => {
+  const prompt = '小明，站在雨中的街道，柔和光线'
+  const sent = []
+  const f = await runtime(t, async function* () {
+    yield { type: 'text-delta', text: block(prompt, '雨中的街道') }
+  }, {}, { config: { ...imageConfig, characterAutoUpdate: false }, fetch: async (_url, init) => {
+    sent.push(JSON.parse(init.body).prompt)
+    return Response.json({ data: [{ b64_json: png }] })
+  } })
+  const result = await f.request('plan', { text: '小明站在雨中的街道。', sessionId: 'chinese-platform', manual: true })
+  assert.equal(result.body.error, null)
+  await untilRuntime(() => sent.length === 1)
+  assert.ok(sent[0].includes(prompt), 'Chinese reaches the paid provider without name or scene deletion')
+})
+
+test('a Chinese-only Comfy plan fails before any image job or GPU submission', async t => {
+  const f = await runtime(t, async function* () {
+    yield { type: 'text-delta', text: block('雨中的少女,柔和光线', '街道') }
+  }, {}, { config: { characterAutoUpdate: false } })
+  const result = await f.request('plan', { text: '少女站在街道上。', sessionId: 'chinese-comfy', manual: true })
+  assert.match(result.body.error, /英文提示词/)
+  assert.deepEqual(f.submitted, [])
+  assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0)
+})
 
 test('channel saves preserve omitted credentials, support explicit clearing and never echo secrets', async t => {
   const f = await runtime(t, async function* () {}, {}, { config: imageConfig })
@@ -480,7 +739,7 @@ test('cancelling a queued channel job never sends its paid request', async t => 
   assert.equal((await f.request('jobs?id=' + queued.body.id, undefined, 'GET')).body.job.state, 'cancelled')
 })
 
-test('restart marks persisted external requests failed without submitting them again', async t => {
+test('restart marks persisted external requests uncertain without submitting them again', async t => {
   let calls = 0
   const id = '11111111-1111-4111-8111-111111111111'
   const f = await runtime(t, async function* () {}, {}, {
@@ -491,9 +750,86 @@ test('restart marks persisted external requests failed without submitting them a
   await delay(20)
   const state = await f.request('state', undefined, 'GET')
   const restored = state.body.jobs.find(job => job.id === id)
-  assert.equal(restored.state, 'failed')
+  assert.equal(restored.state, 'uncertain')
   assert.match(restored.error, /未自动重试/)
   assert.equal(calls, 0, 'startup must never resubmit a potentially billable request')
+})
+
+test('media-action route redrawing uses the official same-version appearance snapshot', async t => {
+  const current = { gameId: 'media-snapshot-game', turn: 1, textVersion: 'text-v1', text: 'A portrait.' }
+  const saved = { textVersion: 'text-v1', data: { characters: { luna: { traits: { face: 'short white hair, blue eyes' } } }, changes: [] } }
+  const media = []
+  const prompts = []
+  const requestHosts = []
+  const tavern = {
+    apiVersion: 2,
+    promptSection() { return () => {} }, onTurnSettled() { this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { return current }, async list() { return media }, async readTurnData() { return saved },
+    async attach() { return { id: 'unused' } }, async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) },
+    async remove(id) { const i = media.findIndex(item => item.id === id); if (i >= 0) media.splice(i, 1) },
+  }
+  const definitions = { characters: [{ id: 'luna', name: 'Luna', traits: { face: 'long red hair, brown eyes' } }] }
+  const secondChannel = { ...imageChannel, id: 'secondary', name: '备用渠道', baseUrl: 'https://image-secondary.test/v1', apiKey: 'secondary-secret' }
+  const f = await runtime(t, async function* () {}, definitions, {
+    tavern, attachments: { async saveImage(input) { return { id: 'attachment-' + input.name, mediaType: input.mediaType } } }, config: { ...imageConfig, imageChannels: [imageChannel, secondChannel] },
+    fetchHosts: ['image-secondary.test'],
+    fetch: async (input, init) => { requestHosts.push(new URL(input).hostname); prompts.push(JSON.parse(init.body).prompt); return Response.json({ data: [{ b64_json: png }] }) },
+  })
+  const macro = '${"name":"Luna","upperBody":"sfw"}$'
+  const original = await f.request('generate', { tag: macro })
+  assert.equal(original.status, 200)
+  await untilRuntime(async () => (await f.request('history', undefined, 'GET')).body.jobs.find(job => job.id === original.body.jobId)?.state === 'done')
+  media.push({ id: 'media-source', kind: 'dsh-tavern-image/image', gameId: current.gameId, turn: current.turn, textVersion: current.textVersion, status: 'ready', attachment: { id: 'old' }, data: { jobId: original.body.jobId } })
+  const action = await f.request('media-action', { operation: 'redraw', gameId: current.gameId, turn: current.turn, textVersion: current.textVersion, mediaId: 'media-source', jobId: original.body.jobId, prompt: macro })
+  assert.equal(action.status, 200, action.body.error)
+  await untilRuntime(async () => media[0].data.replacement?.state === 'ready')
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[1], /short white hair/)
+  assert.doesNotMatch(prompts[1], /long red hair/)
+  assert.equal(media[0].id, 'media-source', 'replacement updates the same official media item')
+  assert.deepEqual(requestHosts, ['image.test', 'image.test'], 'omitting channel follows the source channel')
+  const second = await f.request('media-action', { operation: 'redraw', gameId: current.gameId, turn: current.turn, textVersion: current.textVersion, mediaId: 'media-source', jobId: media[0].data.jobId, prompt: macro, channelId: 'secondary' })
+  assert.equal(second.status, 200, second.body.error)
+  await untilRuntime(async () => media[0].data.replacement?.state === 'ready')
+  assert.equal(requestHosts[2], 'image-secondary.test', 'an explicitly selected saved channel is used for this copy only')
+  assert.equal((await f.request('state', undefined, 'GET')).body.config.activeImageChannel, 'primary', 'replacement never mutates global channel selection')
+})
+
+test('media-action preserves a simple Comfy source template after global mode changes', async t => {
+  const current = { gameId: 'simple-redraw-game', turn: 1, textVersion: 'v1', text: 'A scene.' }, media = [], prompts = []
+  const tavern = {
+    apiVersion: 2, promptSection() { return () => {} }, onTurnSettled() { this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { return current }, async list() { return media }, async readTurnData() { return null },
+    async attach() { return { id: 'unused' } }, async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) }, async remove() {},
+  }
+  const choices = values => [values, {}], node = required => ({ input: { required } })
+  const objectInfo = {
+    CheckpointLoaderSimple: node({ ckpt_name: choices(['source-model.safetensors']) }), CLIPTextEncode: node({ clip: ['CLIP', {}], text: ['STRING', {}] }),
+    EmptyLatentImage: node({ width: ['INT', {}], height: ['INT', {}], batch_size: ['INT', {}] }),
+    KSampler: node({ model: ['MODEL', {}], positive: ['CONDITIONING', {}], negative: ['CONDITIONING', {}], latent_image: ['LATENT', {}], seed: ['INT', {}], steps: ['INT', {}], cfg: ['FLOAT', {}], sampler_name: choices(['euler']), scheduler: choices(['normal']), denoise: ['FLOAT', {}] }),
+    VAEDecode: node({ samples: ['LATENT', {}], vae: ['VAE', {}] }), SaveImage: node({ images: ['IMAGE', {}], filename_prefix: ['STRING', {}] }),
+  }
+  const f = await runtime(t, async function* () {}, {}, {
+    tavern, attachments: { async saveImage() { return { id: 'unused' } } }, objectInfo,
+    fetchHosts: ['comfy.test'],
+    config: { imageBackend: 'comfyui', comfyMode: 'simple', comfyUrl: 'http://comfy.test', comfySimple: { template: 'checkpoint', checkpoint: 'source-model.safetensors', steps: 11, width: 640, height: 896 } },
+    fetch: async (input, init) => {
+      const url = new URL(input)
+      if (url.hostname === 'comfy.test' && url.pathname === '/prompt') { prompts.push(JSON.parse(init.body).prompt); return Response.json({ prompt_id: 'simple-' + prompts.length }) }
+      throw new Error('unexpected fixture fetch ' + url.href)
+    },
+  })
+  const original = await f.request('generate', { tag: 'portrait' })
+  assert.equal(original.status, 200, original.body.error)
+  await f.request('config', { config: { comfyMode: 'workflow' } })
+  media.push({ id: 'simple-media', kind: 'dsh-tavern-image/image', turn: 1, textVersion: 'v1', status: 'pending', data: { jobId: original.body.jobId } })
+  const action = await f.request('media-action', { operation: 'redraw', gameId: current.gameId, turn: 1, textVersion: 'v1', mediaId: 'simple-media', jobId: original.body.jobId, prompt: 'new portrait' })
+  assert.equal(action.status, 200, action.body.error)
+  assert.equal(prompts.length, 2)
+  assert.equal(Object.values(prompts[1]).find(item => item.class_type === 'CheckpointLoaderSimple').inputs.ckpt_name, 'source-model.safetensors')
+  assert.equal(media[0].data.replacement.state, 'pending')
 })
 
 test('an unavailable selected channel creates no job and sends no provider request', async t => {

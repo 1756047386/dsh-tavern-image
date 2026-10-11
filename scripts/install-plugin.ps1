@@ -19,7 +19,7 @@ $MaximumUncompressedBytes = 64MB
 $AllowedFiles = @(
   'package.json', 'client.js', 'cordis.patch.yml', 'console.html', 'design-rules.md',
   'LICENSE', 'README.md', '世界书-通用生图规则.json', 'workflows/.gitkeep',
-  'scripts/install-plugin.ps1', 'scripts/Install-DshTavernImage.cmd'
+  'scripts/install-plugin.ps1', 'scripts/Install-DshTavernImage.cmd', 'scripts/Package-DshTavernImage.ps1'
 )
 
 function Write-Info([string] $Message) {

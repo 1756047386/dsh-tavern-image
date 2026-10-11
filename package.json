@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-comfy",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "DSH Tavern 剧情配图插件，支持 ComfyUI、NovelAI、OpenAI Images、Gemini 等渠道。",
   "type": "module",
   "scripts": {
@@ -20,6 +20,7 @@
     "design-rules.md",
     "世界书-通用生图规则.json",
     "workflows/.gitkeep",
+    "scripts/Package-DshTavernImage.ps1",
     "scripts/install-plugin.ps1",
     "scripts/Install-DshTavernImage.cmd",
     "README.md",

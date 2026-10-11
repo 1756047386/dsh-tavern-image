@@ -4,7 +4,16 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
-2.5.0 已把这批体验改进随仓库发布：逐张提交、世界书按需注入、单张任务操作和安装器。全新安装与旧版升级都看下方「安装与第一次出图」。
+2.5.1 修正了提前点击生图、中文提示词和离线安装包的几个问题。全新安装与旧版升级都看下方「安装与第一次出图」。
+
+## 2.5.1 更新
+
+- **提前点击不用再等报错后重试。** 正文下方的生图按钮出现后，手动点击会等待官方正文接口可读；后台自动配图也开启时，会合并同版本的任务，避免重复提交。连续点击同一轮只发一次请求。
+- **中文提示词按渠道处理。** ComfyUI 保留英文清理，清理后没有可用内容会在创建任务前提示修改；OpenAI、Gemini、Qwen 等中文渠道保留人物名和场景描述。
+- **补齐离线打包脚本。** 仓库、发布包、本机下载和安装副本都保留打包入口，安装后的副本也可以重新生成离线包。
+- 补齐相关回归测试，修正了旧测试中锚点不在正文导致无限等待的问题。完成图仍保持干净，右键或长按编辑提示词。
+
+自动配图仍由 DSH 官方结算事件触发。本次没有实现“按钮出现时自动点击”，也没有改动 DSH 主程序。
 
 ## 2.5.0 更新
 
@@ -32,7 +41,9 @@
 
 安装器默认使用 `%USERPROFILE%\.dsh` 下的 `tavern` Profile；可通过 `-Profile` 指定另一个**已经存在**的 Profile。安装器只安装插件源码，不运行仓库脚本；它调用 DSH 官方 CLI 的 `plugin add`，附带 `--ignore-scripts`，由 DSH 将依赖、`node_modules` 链接和 bundle 一起登记。若 `tools/dsh-tavern-image` 或 Profile 中已有同名依赖，安装器会停止，不覆盖已有内容；更新已安装插件请用插件自己的更新页。
 
-**推荐：从本地源码 ZIP 安装。** 在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。也可以用浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master)，然后在 PowerShell 中指定文件：
+**推荐：下载 [2.5.1 发布页](https://github.com/weixinlll/dsh-tavern-image/releases/tag/v2.5.1)里的 `dsh-tavern-image-2.5.1-install.zip`。** 解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。
+
+也可以在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master) 后，可以在 PowerShell 中指定文件：
 
 ~~~powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\install-plugin.ps1" -SourceArchive "$env:USERPROFILE\Downloads\dsh-tavern-image-master.zip"
@@ -55,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\dsh-tavern-image-
 
 运行 `scripts\Package-DshTavernImage.ps1` 可生成可离线携带的 ZIP；解压后双击其中的 `Install-DshTavernImage.cmd`。插件 **设置 → 本地生图 → 插件更新**页的“本机安装包”入口也可导出源码 ZIP，拷贝到目标电脑后用 `-SourceArchive` 安装。这个入口用于下载和转移安装包；当前 DSH Desktop 的插件清单页没有经验证的 GitHub URL/ZIP 安装输入框，不要在该页粘贴仓库网址。
 
-安装器会显示插件版本和 ZIP 的 SHA-256，便于传输后比对；项目没有发布可信远端校验值，因此此哈希不代表签名或供应链验证。安装后完整退出并重新打开 DSH Desktop，刷新网页不能替代宿主重启。
+安装器会显示插件版本和 ZIP 的 SHA-256，发布页也提供 `SHA256SUMS.txt`，下载后可以比对文件是否完整。安装后完整退出并重新打开 DSH Desktop，刷新网页不能替代宿主重启。
 
 ### 旧版目录迁移
 
@@ -102,6 +113,8 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 多张图按重要性输出，用不同景别、动作或叙事用途表现正文；人物外貌、服装和地点跟随各画面对应的剧情时点。具体构图由模型决定，插件会拦截提示词完全相同的重复任务。
 
 当前 Tavern 的公开事件是在轮次结算后触发。插件能减少规划和出图之间的等待，但不能把启动时机提前到正文生成中，也不会加速 Tavern 本身的结算。
+
+正文下方的「生图」按钮可能比结算事件更早出现。此时手动点击会等待官方正文接口可读；如果后台自动配图也已开启，这次等待会合并到同一份任务，避免重复提交。按钮出现并不代表后台已提供正文数据，插件目前没有实现按钮出现时自动点击。
 
 同一版正文的自动处理会复用已有计划，避免重复事件再次收费。更换渠道或世界书规则会用于后续新轮次；需要重新处理当前轮时，使用手动生图。
 
@@ -283,7 +296,7 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 
 ## 兼容与许可
 
-当前版本 **2.5.0**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
+当前版本 **2.5.1**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
 
 为保留现有 DSH 安装的包解析兼容，包名和浏览器模块加载键仍使用 `dsh-tavern-comfy`；插件 ID、主接口前缀和新安装目录使用 `dsh-tavern-image`。
 

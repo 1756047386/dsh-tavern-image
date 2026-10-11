@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage, createHistoryRequestEpoch, indexedHistoryChanges }')
+  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage, PromptEditor, validMediaContext, createHistoryRequestEpoch, indexedHistoryChanges }')
 const packageName = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).name
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -55,7 +55,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
       const parsedUrl = new URL(url)
       const path = parsedUrl.pathname.split('/').at(-1)
       const body = init.body ? JSON.parse(init.body) : null
-      requests.push({ path, pathname: parsedUrl.pathname, method: init.method || 'GET', body })
+      requests.push({ path, pathname: parsedUrl.pathname, method: init.method || 'GET', query: Object.fromEntries(parsedUrl.searchParams), body })
       let result
       if (extra[path]) result = await extra[path]({ body, state, setState: next => { state = next } })
       else if (path === 'state') result = copy(state)
@@ -75,6 +75,13 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     cursor = 0
     pendingEffects = []
     tree = api.__test.SettingsPanel()
+    pendingEffects.forEach(effect => effect())
+    return tree
+  }
+  function renderComponent(component, props = {}) {
+    cursor = 0
+    pendingEffects = []
+    tree = component(props)
     pendingEffects.forEach(effect => effect())
     return tree
   }
@@ -104,11 +111,33 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     await ready()
     button('插件更新').props.onClick(); render(); await flush(); render()
   }
-  return { React, api, moduleId, ready, openPluginUpdate, render, button, input, role, roleInput, rolePanels, nodes, text, intervals, requests, get state() { return state } }
+  return { React, api, moduleId, ready, openPluginUpdate, render, renderComponent, button, input, role, roleInput, rolePanels, nodes, text, intervals, requests, get state() { return state } }
 }
 
 test('client module registration matches the package key DSH uses to load it', () => {
   assert.equal(harness().moduleId, packageName)
+})
+
+test('message draw runs once per game and turn, stays independent across turns, and unlocks after completion', async () => {
+  const first = deferred()
+  const sent = []
+  const starts = []
+  const runner = harness().api.__test.createMessageDrawRunner(context => {
+    sent.push({ gameId: context.gameId, turn: context.turn })
+    return sent.length === 1 ? first.promise : Promise.resolve({ ok: true })
+  }, context => starts.push([context.gameId, context.turn]))
+  const a = runner({ gameId: 'g1', turn: 2 })
+  const duplicate = runner({ gameId: 'g1', turn: 2 })
+  const otherTurn = runner({ gameId: 'g1', turn: 3 })
+  const otherGame = runner({ gameId: 'g2', turn: 2 })
+  await flush()
+  assert.equal(a, duplicate)
+  assert.deepEqual(sent, [{ gameId: 'g1', turn: 2 }, { gameId: 'g1', turn: 3 }, { gameId: 'g2', turn: 2 }])
+  assert.deepEqual(starts, [['g1', 2], ['g1', 3], ['g2', 2]])
+  first.resolve({ ok: true })
+  await Promise.all([a, duplicate, otherTurn, otherGame])
+  await runner({ gameId: 'g1', turn: 2 })
+  assert.equal(sent.filter(item => item.gameId === 'g1' && item.turn === 2).length, 2, '结束后用户可以再次发起绘图')
 })
 
 test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 caption', () => {
@@ -116,6 +145,242 @@ test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 cap
   const image = ui.api.__test.OfficialImage({ item: { status: 'ready', caption: '[客籍关前验魂灰]', url: '/image.png', data: { jobId: 'j1' } } })
   assert.equal(ui.nodes(image).filter(node => node.type === 'img')[0].props.alt, '[客籍关前验魂灰]')
   assert.equal(ui.text(image), '')
+  assert.equal(ui.nodes(image).some(node => node.type === 'button'), false)
+})
+
+test('官方媒体渲染器在上下文无效时禁用单图操作，并保留旧图显示替换状态', () => {
+  const ui = harness()
+  const old = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 4,
+    item: { id: 'media-1', textVersion: 'text-v2', status: 'ready', url: '/old.png', data: { jobId: 'job-old', replacement: { jobId: 'job-new', state: 'running' } } },
+  })
+  assert.equal(ui.nodes(old).find(node => node.type === 'img').props.src, '/old.png')
+  assert.match(ui.text(old), /替换任务生成中/)
+  assert.equal(ui.nodes(old).filter(node => node.type === 'button' && ui.text(node) === '取消这张图').length, 1)
+
+  const invalid = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: '', turn: 4,
+    item: { id: 'media-1', textVersion: 'text-v2', status: 'ready', url: '/old.png', data: { jobId: 'job-old' } },
+  })
+  assert.equal(ui.nodes(invalid).filter(node => node.type === 'button').length, 0)
+})
+
+test('官方媒体单图取消只提交目标 media 一次；不确定状态不会暴露重试', async () => {
+  const waiting = deferred()
+  const ui = harness({ 'media-action': () => waiting.promise })
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 4,
+    item: { id: 'media-target', textVersion: 'text-v2', status: 'ready', url: '/old.png', data: { jobId: 'job-target', replacement: { jobId: 'job-replacing', state: 'pending' } } },
+  })
+  const cancel = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '取消这张图')
+  const first = cancel.props.onClick()
+  const second = cancel.props.onClick()
+  assert.equal(ui.requests.filter(request => request.path === 'media-action').length, 1)
+  assert.deepEqual(ui.requests.find(request => request.path === 'media-action').body, {
+    operation: 'cancel', gameId: 'game-1', turn: 4, textVersion: 'text-v2', mediaId: 'media-target', jobId: 'job-replacing',
+  })
+  assert.equal(ui.requests.find(request => request.path === 'job-detail').query.id, 'job-replacing')
+  waiting.resolve({ ok: true, state: 'cancelled' }); await Promise.all([first, second])
+
+  const uncertainUi = harness()
+  const uncertain = uncertainUi.renderComponent(uncertainUi.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 4,
+    item: { id: 'media-uncertain', textVersion: 'text-v2', status: 'ready', url: '/old.png', data: { jobId: 'job-uncertain', replacement: { jobId: 'job-possible', state: 'uncertain' } } },
+  })
+  assert.match(uncertainUi.text(uncertain), /状态待确认/)
+  assert.equal(uncertainUi.nodes(uncertain).some(node => node.type === 'button' && /重试/.test(uncertainUi.text(node))), false)
+})
+
+test('原始生成中的图片可按其 jobId 取消；已取消但可能已提交平台的状态会明示', async () => {
+  const ui = harness({ 'media-action': ({ body }) => ({ ok: true, jobId: body.jobId, state: 'cancelled', requestStarted: true }) })
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 5,
+    item: { id: 'media-initial-cancel', textVersion: 'text-v4', status: 'pending', data: { jobId: 'job-initial' } },
+  })
+  const cancel = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '取消这张图')
+  assert.ok(cancel)
+  await cancel.props.onClick()
+  const request = ui.requests.find(item => item.path === 'media-action')
+  assert.equal(request.body.operation, 'cancel')
+  assert.equal(request.body.mediaId, 'media-initial-cancel')
+  assert.equal(request.body.jobId, 'job-initial')
+  assert.equal(ui.requests.find(item => item.path === 'job-detail').query.id, 'job-initial')
+  const updated = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 5,
+    item: { id: 'media-initial-cancel', textVersion: 'text-v4', status: 'failed', data: { jobId: 'job-initial', cancelled: true, cancelMayHaveContinued: true } },
+  })
+  assert.match(ui.text(updated), /平台请求可能已发出/)
+})
+
+test('取消返回待确认时不会提示已取消；replacement 持久化警告不依赖 job-detail', async () => {
+  const ui = harness({ 'media-action': ({ body }) => ({ ok: true, jobId: body.jobId, state: 'uncertain', requestStarted: true }) })
+  const messages = []
+  ui.api.__test.setToastForTest((message, kind) => messages.push({ message, kind }))
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 7,
+    item: { id: 'media-cancel-uncertain', textVersion: 'text-v7', status: 'pending', data: { jobId: 'job-cancel-uncertain' } },
+  })
+  const cancel = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '取消这张图')
+  await cancel.props.onClick()
+  assert.equal(messages.at(-1).kind, 'fail')
+  assert.match(messages.at(-1).message, /状态待确认/)
+  assert.doesNotMatch(messages.at(-1).message, /已取消这张图/)
+
+  const persistedUi = harness()
+  const persisted = persistedUi.renderComponent(persistedUi.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 7,
+    item: { id: 'media-cancel-uncertain', textVersion: 'text-v7', status: 'ready', url: '/old.png', data: { jobId: 'job-old', replacement: { jobId: 'job-replacement', state: 'cancelled', cancelMayHaveContinued: true, requestStarted: true, error: '平台响应未确认' } } },
+  })
+  assert.match(persistedUi.text(persisted), /平台请求可能已发出并继续生成/)
+  assert.match(persistedUi.text(persisted), /平台响应未确认/)
+
+  const cancelledUi = harness()
+  const safelyCancelled = cancelledUi.renderComponent(cancelledUi.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 7,
+    item: { id: 'media-safe-cancel', textVersion: 'text-v7', status: 'ready', url: '/old.png', data: { jobId: 'job-old', replacement: { jobId: 'job-cancelled', state: 'cancelled', cancelMayHaveContinued: false, requestStarted: false, error: '已取消' } } },
+  })
+  assert.match(cancelledUi.text(safelyCancelled), /已取消/)
+  assert.doesNotMatch(cancelledUi.text(safelyCancelled), /平台请求可能已发出并继续生成/)
+})
+
+test('provider 结果不确定时即使 job 标为 failed 也不显示付费重试', async () => {
+  const ui = harness({ 'job-detail': ({ }) => ({ ok: true, job: { id: 'provider-uncertain-job', state: 'failed', requestStarted: true, requestMayHaveSucceeded: true, providerTaskId: 'platform-job-7' } }) })
+  const props = {
+    gameId: 'game-1', turn: 6,
+    item: { id: 'media-uncertain-provider', textVersion: 'text-v5', status: 'ready', url: '/old.png', data: { jobId: 'old-provider-job', replacement: { jobId: 'provider-uncertain-job', state: 'failed' } } },
+  }
+  ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await flush(); await flush()
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.match(ui.text(tree), /平台任务 platform-job-7/)
+  assert.equal(ui.nodes(tree).some(node => node.type === 'button' && /重试/.test(ui.text(node))), false)
+})
+
+test('不确定图片可只读重新查询；找回结果后恢复单图并用新 job 取图', async () => {
+  const ui = harness({
+    'media-action': ({ body }) => ({ ok: true, ...body, jobId: 'recovered-job', state: 'ready' }),
+    'job-detail': ({ query }) => ({ ok: true, job: { id: query.id, rawPrompt: 'new prompt', state: 'done' } }),
+  })
+  const props = {
+    gameId: 'game-1', turn: 8,
+    item: { id: 'media-recover', textVersion: 'text-v8', status: 'ready', url: '/old.png', data: { jobId: 'job-old', replacement: { jobId: 'job-uncertain', state: 'uncertain' } } },
+  }
+  let tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const recover = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重新查询状态')
+  assert.ok(recover)
+  await recover.props.onClick()
+  const request = ui.requests.find(entry => entry.path === 'media-action')
+  assert.equal(request.method, 'POST')
+  assert.deepEqual(request.body, { operation: 'recover', gameId: 'game-1', turn: 8, textVersion: 'text-v8', mediaId: 'media-recover', jobId: 'job-uncertain' })
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.equal(ui.nodes(tree).find(node => node.type === 'img').props.src, 'http://test.local/plugins/dsh-tavern-image/jobs?id=recovered-job&image=1')
+  assert.equal(ui.nodes(tree).some(node => node.type === 'button' && ui.text(node) === '重新查询状态'), false)
+  assert.equal(ui.nodes(tree).some(node => node.type === 'button' && ui.text(node) === '重画'), false, '宿主尚未发布新 job 到媒体记录时隐藏编辑操作')
+
+  const updatedProps = { ...props, item: { ...props.item, status: 'ready', data: { jobId: 'recovered-job', replacement: { jobId: 'recovered-job', state: 'ready' } } } }
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, updatedProps)
+  assert.equal(ui.nodes(tree).some(node => node.type === 'button'), false, '已完成的图保持安静显示，不挂编辑工具栏')
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const recoveredImage = ui.nodes(tree).find(node => node.type === 'img')
+  let prevented = false
+  let stopped = false
+  recoveredImage.props.onContextMenu({ preventDefault() { prevented = true }, stopPropagation() { stopped = true } })
+  assert.equal(prevented, true)
+  assert.equal(stopped, true)
+  await flush()
+  let detail = ui.requests.filter(entry => entry.path === 'job-detail').at(-1)
+  assert.equal(detail.query.id, 'recovered-job')
+})
+
+test('状态轮询必须匹配当前 job id 才能解除不确定付费锁', async () => {
+  const ui = harness({
+    'media-action': () => { throw new TypeError('request timed out') },
+    'job-detail': () => ({ ok: true, job: { id: 'different-job', state: 'done' } }),
+  })
+  const props = { gameId: 'game-1', turn: 10, item: { id: 'media-lock', textVersion: 'text-v10', status: 'pending', data: { jobId: 'job-lock' } } }
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const cancel = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '取消这张图')
+  await cancel.props.onClick()
+  await flush(); await flush()
+  assert.equal(ui.api.__test.hasUncertainMediaAction('media-lock'), true)
+})
+
+test('明确未提交的校验错误不把单图永久锁为待确认', async () => {
+  let attempts = 0
+  const ui = harness({ 'media-action': ({ body }) => {
+    attempts += 1
+    return attempts === 1 ? { ok: false, code: 'REJECTED', submissionNotStarted: true, error: '渠道无效' } : { ok: true, jobId: 'retry-job', mediaId: body.mediaId, state: 'pending' }
+  } })
+  const props = { gameId: 'game-1', turn: 9, item: { id: 'media-validation', textVersion: 'text-v9', status: 'failed', data: { jobId: 'old-job' } } }
+  let tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const retry = () => ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重试这张图')
+  await retry().props.onClick()
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.ok(retry())
+  await retry().props.onClick()
+  assert.equal(attempts, 2)
+})
+
+test('官方媒体提示词编辑器携带完整上下文和本次渠道，成功只报告已提交', async () => {
+  const ui = harness({
+    state: () => ({ ok: true, config: { imageChannels: [{ id: 'channel-2', name: '备用通道' }] } }),
+    'job-detail': () => ({ ok: true, job: { rawPrompt: 'old prompt', negative: 'bad', state: 'done' } }),
+    'media-action': () => ({ ok: true, jobId: 'job-next', mediaId: 'media-1', state: 'pending' }),
+  })
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const image = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 9,
+    item: { id: 'media-1', textVersion: 'text-v3', status: 'ready', url: '/old.png', data: { jobId: 'job-old' } },
+  })
+  const renderedImage = ui.nodes(image).find(node => node.type === 'img')
+  assert.equal(ui.nodes(image).some(node => node.type === 'button'), false)
+  renderedImage.props.onContextMenu({ preventDefault() {}, stopPropagation() {} })
+  await flush()
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  let editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  assert.equal(ui.nodes(editor).find(node => node.type === 'textarea')?.props.value, 'old prompt')
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  // 通过编辑器原有渠道字段选择要用于这次重画的渠道。
+  const channel = ui.nodes(editor).find(node => node.type === 'select' && node.props['aria-label'] === '本次生图渠道')
+  assert.ok(channel)
+  channel.props.onChange({ target: { value: 'channel-2' } })
+  editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const submit = ui.nodes(editor).find(node => node.type === 'button' && /用这段重画/.test(ui.text(node)))
+  const pending = submit.props.onClick()
+  editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  assert.equal(ui.nodes(editor).find(node => node.type === 'button' && /提交中/.test(ui.text(node))).props.disabled, true)
+  await pending
+  editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const request = ui.requests.find(item => item.path === 'media-action')
+  assert.deepEqual(request.body, {
+    operation: 'redraw', gameId: 'game-1', turn: 9, textVersion: 'text-v3', mediaId: 'media-1', jobId: 'job-old',
+    prompt: 'old prompt', negative: 'bad', channelId: 'channel-2',
+  })
+  assert.match(ui.text(editor), /已提交重画/)
+  assert.doesNotMatch(ui.text(editor), /重画完成/)
+})
+
+test('单图重画请求超时后标记待确认并禁止再次付费提交', async () => {
+  const ui = harness({
+    'job-detail': () => ({ ok: true, job: { rawPrompt: 'old prompt', negative: '' } }),
+    'media-action': () => { throw new TypeError('connection timed out') },
+  })
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const image = ui.renderComponent(ui.api.__test.OfficialImage, {
+    gameId: 'game-1', turn: 10,
+    item: { id: 'media-timeout-unique', textVersion: 'text-v3', status: 'ready', url: '/old.png', data: { jobId: 'job-timeout-source' } },
+  })
+  ui.nodes(image).find(node => node.type === 'img').props.onContextMenu({ preventDefault() {}, stopPropagation() {} })
+  await flush()
+  let editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const redraw = ui.nodes(editor).find(node => node.type === 'button' && /用这段重画/.test(ui.text(node)))
+  await redraw.props.onClick()
+  editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const afterTimeout = ui.nodes(editor).find(node => node.type === 'button' && /用这段重画/.test(ui.text(node)))
+  assert.match(ui.text(editor), /状态待确认/)
+  assert.equal(afterTimeout.props.disabled, true)
+  await afterTimeout.props.onClick()
+  assert.equal(ui.requests.filter(request => request.path === 'media-action').length, 1)
 })
 
 test('history requests become stale as soon as the panel switches games', () => {

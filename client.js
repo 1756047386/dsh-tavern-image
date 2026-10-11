@@ -61,6 +61,22 @@ function indexedHistoryChanges(changes) {
   return (Array.isArray(changes) ? changes : []).map((change, index) => ({ change, index })).reverse()
 }
 
+function createMessageDrawRunner(send, onStart) {
+  const inFlight = new Map()
+  return context => {
+    const gameId = String(context && context.gameId || '')
+    const turn = Number(context && context.turn)
+    if (!gameId || !Number.isSafeInteger(turn) || turn < 1) return Promise.resolve(null)
+    const key = JSON.stringify([gameId, turn])
+    if (inFlight.has(key)) return inFlight.get(key)
+    try { onStart?.(context) } catch {}
+    const request = Promise.resolve().then(() => send(context))
+    inFlight.set(key, request)
+    request.finally(() => { if (inFlight.get(key) === request) inFlight.delete(key) }).catch(() => {})
+    return request
+  }
+}
+
 // 图像查看器的开启函数：由查看器组件挂载时赋值（见下面的 openImageOverlay = ...）。
 // 必须在这里显式声明 —— 它以前是「不带声明的赋值」，靠非严格模式在 window 上造一个
 // 隐式全局变量。一旦 bundle 被包进严格模式，那行赋值会直接 ReferenceError，而周围
@@ -4824,30 +4840,28 @@ function versionsOf(jobId) {
             } catch (error) { reportHost('character-history-panel-failed', { error: String(error?.message ?? error).slice(0, 160) }) }
           }
           try {
+            const runMessageDraw = createMessageDrawRunner(async context => {
+              const r = await jsonFetch(BASE + '/attach-turn', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ gameId: context.gameId, turn: context.turn }),
+              }).catch(error => ({ ok: false, error: String(error && error.message || error) }))
+              reportHost('attach-turn', {
+                gameId: String(context && context.gameId || '').slice(0, 12), turn: context && context.turn,
+                ok: Boolean(r && r.ok), attached: r && r.attached, error: String(r && r.error || '').slice(0, 160),
+              })
+              if (typeof showToast === 'function') {
+                if (r && r.ok && r.attached) showToast('已提交 ' + r.attached + ' 张，出图后自动插进正文')
+                else if (r && r.ok && r.skipped) showToast('本轮自动跳过配图：' + (r.reason || '没有合适的画面'))
+                else showToast('生图没出画面：' + ((r && r.error) || '规划没有产出画面'))
+              }
+              return r
+            }, () => { if (typeof showToast === 'function') showToast('正在提交，等待本轮正文数据…') })
             const off = ui.registerMessageAction({
               id: 'dsh-tavern-image-draw',
               label: '🎨 生图',
               when: context => Boolean(context && context.gameId) && Number(context.turn) > 0,
-              run: async context => {
-                const r = await jsonFetch(BASE + '/attach-turn', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ gameId: context.gameId, turn: context.turn }),
-                }).catch(error => ({ ok: false, error: String(error && error.message || error) }))
-                reportHost('attach-turn', {
-                  gameId: String(context && context.gameId || '').slice(0, 12), turn: context && context.turn,
-                  ok: Boolean(r && r.ok), attached: r && r.attached, error: String(r && r.error || '').slice(0, 160),
-                })
-                if (typeof showToast === 'function') {
-                  if (r && r.ok && r.attached) {
-                    showToast('已提交 ' + r.attached + ' 张，出图后自动插进正文')
-                  } else if (r && r.ok && r.skipped) {
-                    showToast('本轮自动跳过配图：' + (r.reason || '没有合适的画面'))
-                  } else {
-                    showToast('生图没出画面：' + ((r && r.error) || '规划没有产出画面'))
-                  }
-                }
-              },
+              run: runMessageDraw,
             })
             owner.effect?.(() => off, 'dsh-tavern-image: message action')
 
@@ -4905,7 +4919,7 @@ function versionsOf(jobId) {
 
     exports.name = 'dsh-tavern-image'
     exports.inject = ['slots']
-    exports.apply = apply; exports.__test = Object.assign(exports.__test || {}, { OfficialImage, PromptEditor, validMediaContext, setToastForTest: fn => { showToast = fn }, hasUncertainMediaAction: mediaId => mediaUncertainActions.has(String(mediaId)) })
+    exports.apply = apply; exports.__test = Object.assign(exports.__test || {}, { OfficialImage, PromptEditor, validMediaContext, createMessageDrawRunner, setToastForTest: fn => { showToast = fn }, hasUncertainMediaAction: mediaId => mediaUncertainActions.has(String(mediaId)) })
     return module.exports
   },
 })
