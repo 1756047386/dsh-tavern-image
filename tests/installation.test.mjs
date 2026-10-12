@@ -17,6 +17,8 @@ const officialCli = process.env.DSH_CLI_PATH || join(
   'Programs', 'DSH Desktop', 'resources', 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
 )
 const testWithTimeout = (name, fn) => test(name, { timeout: 120_000 }, fn)
+const projectVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version
+const projectVersionPattern = new RegExp(projectVersion.replace(/\./g, '\\.'))
 
 async function runPowerShell(args, options = {}) {
   try {
@@ -215,6 +217,80 @@ testWithTimeout('installer leaves an existing plugin directory and profile untou
   assert.equal(await readFile(join(sandbox.profile, 'package.json'), 'utf8'), beforeProfile)
 })
 
+testWithTimeout('portable root/profile paths work with NoRegister without changing another profile or its stage directory', async t => {
+  if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
+
+  const sandbox = await makeSandbox(t)
+  const otherProfile = join(sandbox.dshHome, 'profiles', 'other')
+  const targetTools = join(sandbox.dshHome, 'profile-data', 'sim', 'data', 'tools')
+  const unrelatedStage = join(targetTools, '.dsh-tavern-image-stage-in-progress')
+  await mkdir(otherProfile, { recursive: true })
+  await mkdir(unrelatedStage, { recursive: true })
+  const otherManifest = JSON.stringify({ name: 'dsh-profile-other', dependencies: { keep: '1.0.0' } })
+  await writeFile(join(otherProfile, 'package.json'), otherManifest)
+  await writeFile(join(unrelatedStage, 'owner.txt'), 'another operation')
+
+  const args = [
+    installer, '-Profile', 'sim', '-Root', join(sandbox.dshHome, 'profiles'),
+    '-SourceDirectory', root, '-NoRegister', '-Quiet',
+  ]
+  await assert.rejects(runPowerShell(args, { env: sandbox.env }))
+  assert.equal(await readFile(join(unrelatedStage, 'owner.txt'), 'utf8'), 'another operation')
+  await rm(unrelatedStage, { recursive: true })
+
+  const result = await runPowerShell(args, { env: sandbox.env })
+  assert.equal(result.stdout, '')
+  assert.equal(JSON.parse(await readFile(join(otherProfile, 'package.json'), 'utf8')).dependencies.keep, '1.0.0')
+  assert.equal(JSON.parse(await readFile(join(sandbox.sourceTarget, 'package.json'), 'utf8')).version, projectVersion)
+  assert.equal(await stat(join(sandbox.profile, 'node_modules')).catch(() => null), null)
+
+  const profileRootSandbox = await makeSandbox(t)
+  await runPowerShell([
+    installer, '-Profile', 'sim', '-DshHome', join(profileRootSandbox.profile),
+    '-SourceDirectory', root, '-NoRegister', '-Quiet',
+  ], { env: profileRootSandbox.env })
+  assert.equal(JSON.parse(await readFile(join(profileRootSandbox.sourceTarget, 'package.json'), 'utf8')).version, projectVersion)
+})
+
+testWithTimeout('automatic discovery skips roots without the target profile and normalizes DSH_HOME profiles paths', async t => {
+  if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
+
+  const sandbox = await makeSandbox(t)
+  const wrongRoot = join(sandbox.directory, 'wrong-dsh')
+  const rightRoot = join(sandbox.directory, 'portable-dsh')
+  await mkdir(join(wrongRoot, 'profiles', 'other'), { recursive: true })
+  await mkdir(join(rightRoot, 'profiles', 'sim'), { recursive: true })
+  await writeFile(join(rightRoot, 'profiles', 'sim', 'package.json'), JSON.stringify({ name: 'portable-sim', dependencies: {} }))
+  const env = {
+    ...sandbox.env,
+    DSH_HOME: join(wrongRoot, 'profiles'),
+    USERPROFILE: sandbox.directory,
+    LOCALAPPDATA: join(sandbox.directory, 'local-app-data'),
+    APPDATA: join(sandbox.directory, 'app-data'),
+  }
+
+  await assert.rejects(runPowerShell([
+    installer, '-Profile', 'sim', '-DshHome', wrongRoot,
+    '-SourceDirectory', root, '-NoRegister', '-Quiet',
+  ], { env }))
+  await assert.rejects(stat(join(wrongRoot, 'profile-data')))
+
+  await mkdir(join(sandbox.directory, '.dsh', 'profiles', 'sim'), { recursive: true })
+  await writeFile(join(sandbox.directory, '.dsh', 'profiles', 'sim', 'package.json'), JSON.stringify({ name: 'fallback-sim', dependencies: {} }))
+  const fallbackRoot = join(sandbox.directory, '.dsh')
+  const fallbackEnv = { ...env, DSH_HOME: join(wrongRoot, 'profiles') }
+  await runPowerShell([
+    installer, '-Profile', 'sim', '-SourceDirectory', root, '-NoRegister', '-Quiet',
+  ], { env: fallbackEnv })
+  assert.equal(JSON.parse(await readFile(join(fallbackRoot, 'profile-data', 'sim', 'data', 'tools', 'dsh-tavern-image', 'package.json'), 'utf8')).version, projectVersion)
+
+  const profilesEnv = { ...env, DSH_HOME: join(rightRoot, 'profiles') }
+  await runPowerShell([
+    installer, '-Profile', 'sim', '-SourceDirectory', root, '-NoRegister', '-Quiet',
+  ], { env: profilesEnv })
+  assert.equal(JSON.parse(await readFile(join(rightRoot, 'profile-data', 'sim', 'data', 'tools', 'dsh-tavern-image', 'package.json'), 'utf8')).version, projectVersion)
+})
+
 testWithTimeout('local install bundle contains a source ZIP with only the declared package files', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell packaging tests run on Windows')
   const sandbox = await makeSandbox(t)
@@ -234,7 +310,7 @@ testWithTimeout('local install bundle contains a source ZIP with only the declar
   const sourceZip = join(extracted, 'dsh-tavern-image-source.zip')
   const installSandbox = await makeSandbox(t)
   const result = await runPowerShell(await installArgs(installSandbox, ['-SourceArchive', sourceZip]), { env: installSandbox.env })
-  assert.match(result.stdout, /2\.5\.1/)
+  assert.match(result.stdout, projectVersionPattern)
   const installedEntries = await readdir(installSandbox.sourceTarget)
   assert.ok(installedEntries.includes('client.js'))
   assert.ok(installedEntries.includes('lib'))
@@ -260,7 +336,7 @@ testWithTimeout('server download ZIP buffer installs through the official DSH CL
   await writeFile(archivePath, archive)
 
   const result = await runPowerShell(await installArgs(sandbox, ['-SourceArchive', archivePath]), { env: sandbox.env })
-  assert.match(result.stdout, /2\.5\.1/)
+  assert.match(result.stdout, projectVersionPattern)
   assert.match(result.stdout, /SHA-256/)
   assert.match(result.stdout, /Done in/)
   const profile = JSON.parse(await readFile(join(sandbox.profile, 'package.json'), 'utf8'))

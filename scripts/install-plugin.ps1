@@ -4,8 +4,10 @@ param(
   [string] $Profile = 'tavern',
   [string] $SourceArchive,
   [string] $SourceDirectory,
+  [Alias('Root', 'DshRoot', 'DshPath')]
   [string] $DshHome,
   [string] $DshCliPath,
+  [switch] $NoRegister,
   [switch] $Quiet
 )
 
@@ -255,10 +257,87 @@ function Assert-DirectChildPath([string] $Path, [string] $Parent, [string] $Expe
   if ((Get-AbsolutePath $Path) -ne $expectedPath) { throw '暂存或目标路径不是插件目录的直接子项。' }
 }
 
+# 数据根目录必须包含指定的 Profile，避免选中另一个 DSH 安装后误报。
+function Test-DshDataRoot([string] $Path) {
+  if (-not $Path) { return $false }
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  return (Test-Path -LiteralPath (Join-Path $Path 'profiles') -PathType Container)
+}
+
+function Test-DshDataHome([string] $Path, [string] $ProfileName) {
+  if (-not (Test-DshDataRoot $Path)) { return $false }
+  return (Test-Path -LiteralPath (Join-Path (Join-Path $Path 'profiles') $ProfileName) -PathType Container)
+}
+
+# 找出 DSH 数据目录。
+# 顺序：显式参数 > DSH_HOME > 常见位置 > 各固定磁盘根下的常见目录名。
+# 显式指定时，「根目录 / profiles 目录 / profiles\<profile> 目录」三种层级任选。
+# 一键包或改版可能没有 .dsh 这一层（直接 根目录\profiles\...），所以这里主动找；
+# 找不到就把找过的位置全列出来，并给出可复制的命令。
+function Resolve-DshDataHome([string] $Given, [string] $ProfileName) {
+  if ($Given) {
+    $full = Get-AbsolutePath $Given
+    $layers = @($full, (Split-Path -Parent $full), (Split-Path -Parent (Split-Path -Parent $full)))
+    foreach ($candidate in $layers) {
+      if ($candidate -and (Test-DshDataHome $candidate $ProfileName)) { return (Get-AbsolutePath $candidate) }
+    }
+    foreach ($candidate in $layers) {
+      if ($candidate -and (Test-DshDataRoot $candidate)) {
+        throw "指定的数据目录中不存在 Profile '$ProfileName'：$(Join-Path (Join-Path $candidate 'profiles') $ProfileName)。请先在 DSH Desktop 中创建并启动该 Profile。"
+      }
+    }
+    $lines = @(
+      '指定的目录下没有 profiles 文件夹：' + $full,
+      '  请传 DSH 的根目录（里面直接就是 profiles 文件夹的那一层）。三种层级都能自动识别：',
+      '    -DshHome "D:\dsh"    或    -Root "D:\dsh\profiles"    或    -Root "D:\dsh\profiles\' + $ProfileName + '"'
+    )
+    throw ($lines -join [Environment]::NewLine)
+  }
+
+  $tried = New-Object System.Collections.Generic.List[string]
+  if ($env:DSH_HOME) {
+    $tried.Add('$env:DSH_HOME = ' + $env:DSH_HOME)
+    $environmentHome = Get-AbsolutePath $env:DSH_HOME
+    $environmentLayers = @($environmentHome, (Split-Path -Parent $environmentHome), (Split-Path -Parent (Split-Path -Parent $environmentHome)))
+    foreach ($candidate in $environmentLayers) {
+      if ($candidate -and (Test-DshDataHome $candidate $ProfileName)) { return (Get-AbsolutePath $candidate) }
+    }
+  }
+
+  $guesses = New-Object System.Collections.Generic.List[string]
+  if ($env:USERPROFILE) {
+    $guesses.Add((Join-Path $env:USERPROFILE '.dsh'))
+    $guesses.Add((Join-Path $env:USERPROFILE 'dsh'))
+  }
+  if ($env:LOCALAPPDATA) { $guesses.Add((Join-Path $env:LOCALAPPDATA 'dsh')) }
+  if ($env:APPDATA) { $guesses.Add((Join-Path $env:APPDATA 'dsh')) }
+  try {
+    foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+      if ($drive.DriveType -ne [IO.DriveType]::Fixed) { continue }
+      if (-not $drive.IsReady) { continue }
+      $driveRoot = $drive.RootDirectory.FullName
+      foreach ($name in @('.dsh', 'dsh', 'DSH', 'dsh-tavern')) { $guesses.Add((Join-Path $driveRoot $name)) }
+    }
+  } catch { }
+
+  foreach ($candidate in $guesses) {
+    $tried.Add($candidate)
+    if (Test-DshDataHome $candidate $ProfileName) { return (Get-AbsolutePath $candidate) }
+  }
+
+  $report = @("没找到包含 Profile '$ProfileName' 的 DSH 数据目录（应有 profiles\$ProfileName 文件夹）。已经找过这些位置：")
+  foreach ($item in $tried) { $report += '  ' + $item }
+  $report += '  一键包或改版的数据目录可能不在上面，手动指定即可（三种层级任选）：'
+  $report += '    powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -DshHome "<DSH 根目录>"'
+  $report += '  <DSH 根目录> 指「里面直接就是 profiles 文件夹」的那一层；传 profiles 目录或 profiles\' + $ProfileName + ' 目录也能自动识别。'
+  throw ($report -join [Environment]::NewLine)
+}
+
 $movedPackage = $false
 try {
-  if (-not $DshHome) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' } }
-  $DshHome = Get-AbsolutePath $DshHome
+  # 根目录：显式参数 > DSH_HOME > 常见位置 > 各固定磁盘的常见目录（适配没有 .dsh 这一层的布局）
+  $DshHome = Resolve-DshDataHome -Given $DshHome -ProfileName $Profile
+  Write-Info ('DSH 数据目录：' + $DshHome)
   $profilePath = Join-Path (Join-Path $DshHome 'profiles') $Profile
   $pluginPath = Join-Path (Join-Path (Join-Path (Join-Path $DshHome 'profile-data') $Profile) 'data\tools') 'dsh-tavern-image'
   $pluginParent = Split-Path -Parent $pluginPath
@@ -266,15 +345,10 @@ try {
   $null = New-Item -ItemType Directory -Force -Path $pluginParent
   Assert-NoReparsePoint -Path $pluginParent -StopAt $DshHome
   Assert-NoReparsePoint -Path $pluginPath -StopAt $pluginParent
-  # 清理历史残留的暂存目录：data\tools 下只要有 DSH 不认识的目录，启动扫描就会失败，并把
-  # 插件清单 tools.cordis.yml 覆写成空数组，导致所有插件失效。失败安装留下的 stage 必须清掉。
-  foreach ($stale in @(Get-ChildItem -LiteralPath $pluginParent -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.dsh-tavern-image-stage-*' })) {
-    try {
-      Remove-Item -LiteralPath $stale.FullName -Recurse -Force
-      Write-Info "已清理残留暂存目录：$($stale.Name)"
-    } catch {
-      Write-Info "残留暂存目录清理失败，请手动删除：$($stale.FullName)"
-    }
+  $existingStage = Get-ChildItem -LiteralPath $pluginParent -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like '.dsh-tavern-image-stage-*' } | Select-Object -First 1
+  if ($existingStage) {
+    throw "发现另一个安装遗留或正在使用的暂存目录，安装器不会删除它：$($existingStage.FullName)。请确认没有其他安装正在运行后手动检查。"
   }
   if (Test-Path -LiteralPath $pluginPath) {
     $looksInstalled = Test-Path -LiteralPath (Join-Path $pluginPath 'package.json') -PathType Leaf
@@ -309,9 +383,13 @@ try {
       throw "Profile 已登记 $PackageName（$existingSpec）。安装器不会覆盖已有 link；请用 DSH 插件更新入口更新，或先移除 Profile 里的这条登记后重试。"
     }
   }
-  $cliPath = Resolve-DshCli $DshHome
-  $node = Get-Command node -ErrorAction SilentlyContinue
-  if (-not $node) { throw '未找到 Node.js，无法运行 DSH CLI。请修复 DSH Desktop/Node 环境后重试。' }
+  $cliPath = $null
+  $node = $null
+  if (-not $NoRegister) {
+    $cliPath = Resolve-DshCli $DshHome
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) { throw '未找到 Node.js，无法运行 DSH CLI。请修复 DSH Desktop/Node 环境后重试。' }
+  }
 
   $source = Get-SourceArchive
   $stageName = '.dsh-tavern-image-stage-' + [guid]::NewGuid().ToString('N')
@@ -341,6 +419,13 @@ try {
     if (Test-Path -LiteralPath $pluginPath) { throw "目标目录在安装过程中出现，已停止：$pluginPath" }
     Move-Item -LiteralPath $stagePath -Destination $pluginPath
     $movedPackage = $true
+    if ($NoRegister) {
+      $movedPackage = $false
+      Write-Info '（-NoRegister）已跳过官方 CLI 注册，源码只放到目标目录。'
+      Write-Info ('源码目录：' + $pluginPath)
+      Write-Info '请在目标 DSH 环境里按它自己的方式启用这个目录（例如手动登记 link 或加入它的插件清单），然后完整重启 DSH。'
+      return
+    }
     $oldHomeValue = $env:DSH_HOME
     $oldPathValue = $env:PATH
     try {

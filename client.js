@@ -439,7 +439,8 @@ let openImageOverlay = null
           .then(result => {
             if (!live || !result || !result.job) return
             setPolledJob(result.job)
-            if (String(result.job.id || '') === effectiveJobId && ['done', 'ready', 'failed', 'cancelled'].includes(result.job.state)) mediaUncertainActions.delete(mediaContext.mediaId)
+            const providerMayStillBeWorking = result.job.requestMayHaveSucceeded === true || (result.job.state === 'cancelled' && (result.job.requestStarted === true || result.job.cancelMayHaveContinued === true))
+            if (String(result.job.id || '') === effectiveJobId && ['done', 'ready', 'failed', 'cancelled'].includes(result.job.state) && !providerMayStillBeWorking) mediaUncertainActions.delete(mediaContext.mediaId)
           })
           .catch(() => {})
         poll()
@@ -463,7 +464,8 @@ let openImageOverlay = null
           const nextJobId = String(result.jobId || effectiveJobId)
           setActionJobId(nextJobId)
           setPolledJob({ ...(polledJob || {}), ...result, id: nextJobId, state: result.state || (operation === 'cancel' ? 'cancelled' : 'pending') })
-          if (result.state === 'uncertain' || result.requestMayHaveSucceeded === true) mediaUncertainActions.add(lock)
+          const providerMayStillBeWorking = result.requestMayHaveSucceeded === true || (result.state === 'cancelled' && (result.cancelMayHaveContinued === true || result.requestStarted === true))
+          if (result.state === 'uncertain' || providerMayStillBeWorking) mediaUncertainActions.add(lock)
           else if (readOnlyRecovery && ['ready', 'done', 'failed', 'cancelled'].includes(result.state)) mediaUncertainActions.delete(lock)
           if (typeof showToast === 'function') {
             if (readOnlyRecovery) showToast(({ ready: '已找回这张图', done: '已找回这张图', pending: '已重新查询，任务仍在处理中', running: '已重新查询，任务仍在处理中', failed: '已确认这张图失败', uncertain: '状态仍待确认，请到生图平台检查' })[result.state] || '已重新查询这张图的状态', result.state === 'uncertain' ? 'fail' : 'ok')
@@ -502,7 +504,7 @@ let openImageOverlay = null
       const src = recoveredReady
         ? BASE + '/jobs?id=' + encodeURIComponent(effectiveJobId) + '&image=1'
         : String(item && item.url || '') || (jobId && !(item && item.status === 'failed') && !(item && item.data && item.data.cancelled === true) ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
-      const jobMayHaveReachedProvider = Boolean(currentPolledJob && currentPolledJob.requestMayHaveSucceeded === true)
+      const jobMayHaveReachedProvider = Boolean(currentPolledJob && (currentPolledJob.requestMayHaveSucceeded === true || currentPolledJob.state === 'uncertain'))
       const isUncertain = Boolean((currentPolledJob && currentPolledJob.state === 'uncertain') || jobMayHaveReachedProvider || (replacement && replacement.state === 'uncertain' && !recoveredReady))
       const isCancelled = !recoveredReady && (Boolean(item && item.data && item.data.cancelled === true) || Boolean(currentPolledJob && currentPolledJob.state === 'cancelled') || Boolean(replacement && replacement.state === 'cancelled'))
       const taskState = recoveredReady ? 'done' : isUncertain ? 'uncertain' : isCancelled ? 'cancelled' : String(currentPolledJob && currentPolledJob.state || replacement && replacement.state || (item && item.status === 'failed' ? 'failed' : item && item.status === 'pending' ? 'pending' : 'done'))
@@ -510,9 +512,33 @@ let openImageOverlay = null
       const statusLabel = ({ queued: '排队中', pending: '排队中', running: '生成中', processing: '生成中', done: '完成', ready: '完成', failed: '失败', cancelled: '已取消', uncertain: '状态待确认' })[taskState] || '状态待确认'
       // 顺利出图时不再挂一行「完成」文案：图本身就是结果，状态行只在需要说明时出现。
       const quietStatus = taskState === 'done' && !activeReplacement && !(item && item.status === 'failed')
+      // 没有画面可看时（生成中／失败／已取消／待确认）也要给一块能点的占位：点一下、右键或长按
+      // 都能打开提示词编辑器，改完重画。否则这些状态下页面只剩一行文字，用户没有任何出路
+      //（失败后点重试、再马上取消，就会掉进这个死角）。
+      const showImage = Boolean(src) && (!imgError || imgRetry < 20)
+      const placeholderText = taskState === 'failed' ? '配图失败 · 点这里改提示词重画'
+        : taskState === 'cancelled' ? '这张图已取消 · 点这里改提示词重画'
+          : taskState === 'uncertain' ? '等待平台确认 · 点这里改提示词重画'
+            : '正在生成…'
+      const placeholder = h('div', {
+        key: 'illustration-placeholder',
+        title: '点一下或右键改提示词 / 重画',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '110px', maxWidth: 'min(660px, 96vw)', borderRadius: '10px', background: '#1a1d24', border: '1px dashed #2c313c', color: '#8b93a1', fontSize: '12px', cursor: 'pointer', margin: '10px 0', userSelect: 'none' },
+        onClick: () => openEditorFor(displayJobId, title, displayMediaContext),
+        onContextMenu: event => {
+          cancelPress()
+          event.preventDefault()
+          event.stopPropagation()
+          openEditorFor(displayJobId, title, displayMediaContext)
+        },
+        onMouseDown: event => { if (event.button === 0) beginPress(displayJobId, title, displayMediaContext) },
+        onMouseUp: cancelPress, onMouseLeave: cancelPress,
+        onTouchStart: () => beginPress(displayJobId, title, displayMediaContext),
+        onTouchEnd: cancelPress, onTouchMove: cancelPress,
+      }, placeholderText)
       // TavernPluginMediaItem 会统一追加 figcaption；这里保留 alt 和预览标题即可。
       return h('div', { style: wrapStyle },
-        src && (!imgError || imgRetry < 20) ? h('img', {
+        showImage ? h('img', {
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
           onError: () => setImgError('加载失败'),
           title: '点一下看大图 · 右键或长按改提示词 / 重画',
@@ -530,7 +556,7 @@ let openImageOverlay = null
           onMouseUp: cancelPress, onMouseLeave: cancelPress,
           onTouchStart: () => beginPress(displayJobId, title, displayMediaContext),
           onTouchEnd: cancelPress, onTouchMove: cancelPress,
-        }) : null,
+        }) : placeholder,
         imgError ? h('div', { style: noteStyle }, imgRetry >= 20 ? '图取不到（' + imgError + '）　' : '正在取回…（第 ' + imgRetry + ' 次）', imgRetry >= 20 ? h('button', { type: 'button', onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) } }, '重新读取') : null) : null,
         quietStatus ? null : h('div', { style: { ...noteStyle, marginTop: '4px' }, role: 'status', 'aria-live': 'polite' },
           taskState === 'uncertain' ? '状态待确认：任务号 ' + effectiveJobId + (currentPolledJob?.providerTaskId ? '（平台任务 ' + String(currentPolledJob.providerTaskId) + '）' : '') + '；请到生图平台检查，暂不自动重试。' :
@@ -542,7 +568,7 @@ let openImageOverlay = null
           ? h('button', { type: 'button', onClick: () => mediaAction('cancel'), disabled: actionBusy }, '取消这张图') : null,
         validMediaContext(mediaContext) && !actionBusy && taskState === 'failed' && !jobMayHaveReachedProvider
           ? h('button', { type: 'button', onClick: () => mediaAction('retry'), disabled: actionBusy }, '重试这张图') : null,
-        validMediaContext(mediaContext) && taskState === 'uncertain'
+        validMediaContext(mediaContext) && (taskState === 'uncertain' || (taskState === 'cancelled' && cancellationMayContinue))
           ? h('button', { type: 'button', onClick: () => mediaAction('recover'), disabled: actionBusy }, actionBusy ? '查询中…' : '重新查询状态') : null)
     }
 
@@ -3913,7 +3939,7 @@ function versionsOf(jobId) {
           h('div', { style: { marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' } },
             list.length ? list.map(entry => h('div', {
               key: entry.index,
-              style: { borderRadius: '10px', border: '1px solid rgba(120,140,170,.2)', background: entry.enabled === false ? 'rgba(255,255,255,.015)' : 'rgba(255,255,255,.04)', padding: '9px 11px' },
+              style: { borderRadius: '10px', border: '1px solid rgba(120,140,170,.28)', background: entry.enabled === false ? '#131820' : '#1a2029', color: '#e8edf5', padding: '9px 11px' },
             },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
                 h('input', {
@@ -3938,7 +3964,7 @@ function versionsOf(jobId) {
                   style: ta,
                   onChange: e => patchEntrySoon(entry.index, { content: e.target.value }, '内容'),
                 }),
-                h('div', { style: { marginTop: '10px', padding: '9px', borderRadius: '8px', background: 'rgba(255,255,255,.025)', border: '1px solid rgba(120,140,170,.16)' } },
+                h('div', { style: { marginTop: '10px', padding: '9px', borderRadius: '8px', background: '#141a22', color: '#e8edf5', border: '1px solid rgba(120,140,170,.24)' } },
                   h('div', { style: { fontSize: '12px', marginBottom: '6px' } }, '触发方式'),
                   h('label', { style: Object.assign({}, S.row, { fontSize: '12px', marginBottom: '6px' }) },
                     h('input', { type: 'radio', name: 'wb-activation-' + entry.index, value: 'always', checked: (wbDrafts[entry.index]?.activation ?? entry.activation ?? 'always') === 'always', onChange: () => patchEntry(entry.index, { activation: 'always' }, false, '触发方式') }),
@@ -3965,7 +3991,7 @@ function versionsOf(jobId) {
             )) : h('div', { style: { fontSize: '12px', color: '#9aa3b2', padding: '12px' } },
               '还没有条目。可以点「📥 导入世界书」，或「➕ 新条目」自己写。'),
           ),
-          h('details', { style: { marginTop: '14px', borderTop: '1px solid rgba(120,140,170,.2)', paddingTop: '10px' } },
+          h('details', { style: { marginTop: '14px', borderTop: '1px solid rgba(120,140,170,.2)', paddingTop: '10px', color: '#dbe3ee' } },
             h('summary', { style: { cursor: 'pointer', fontSize: '12px', color: '#b8c5d3' } }, '上次规划的诊断'),
             context ? h('div', { style: { marginTop: '8px', fontSize: '11px', color: '#b8c5d3', lineHeight: 1.6 } },
               h('div', { style: { marginBottom: '8px' } }, '轮次 ' + (context.turn ?? '—') + ' · 渠道 ' + (providers.find(([id]) => id === context.backend)?.[1] || context.backend || '—') + ' · 时间 ' + (context.at || '—')),
@@ -4268,7 +4294,7 @@ function versionsOf(jobId) {
               style: {
                 borderRadius: '10px', padding: '10px 12px',
                 border: String(p.id) === active ? '1px solid rgba(106,168,255,.75)' : '1px solid rgba(120,140,170,.22)',
-                background: String(p.id) === active ? 'rgba(106,168,255,.1)' : 'rgba(255,255,255,.03)',
+                background: String(p.id) === active ? '#1b2a3e' : '#1a2029', color: '#e8edf5',
               },
             },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '8px' } },

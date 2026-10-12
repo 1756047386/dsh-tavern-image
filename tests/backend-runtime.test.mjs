@@ -755,6 +755,42 @@ test('restart marks persisted external requests uncertain without submitting the
   assert.equal(calls, 0, 'startup must never resubmit a potentially billable request')
 })
 
+test('cancelled ComfyUI task stays cancelled during polling and explicit recovery fetches its original result without POST', async t => {
+  const id = '22222222-2222-4222-8222-222222222222'
+  const current = { gameId: 'recovery-game', turn: 1, textVersion: 'v1', text: 'A portrait.' }
+  const media = [{ id: 'cancelled-media', owner: 'dsh-tavern-image', kind: 'dsh-tavern-image/image', turn: 1, textVersion: 'v1', status: 'failed', data: { jobId: id, cancelled: true, cancelMayHaveContinued: true } }]
+  const calls = []
+  const tavern = {
+    apiVersion: 2,
+    promptSection() { return () => {} }, onTurnSettled() { this.bridgeReady = true; return () => {} },
+    onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+    async getTurn() { return current }, async list() { return media },
+    async attach() { return { id: 'unused' } }, async update(mediaId, patch) { Object.assign(media.find(item => item.id === mediaId), patch) },
+  }
+  const f = await runtime(t, async function* () {}, {}, {
+    tavern, attachments: { async saveImage(input) { return { id: 'recovered-attachment', mediaType: input.mediaType } } },
+    config: { comfyUrl: 'http://comfy.test' },
+    initialJobs: { [id]: { id, state: 'cancelled', backend: 'comfyui', comfyId: 'original-provider-id', comfyEndpoint: 'http://comfy.test', outputNode: '2', requestStarted: true, cancelMayHaveContinued: true, createdAt: Date.now() } },
+    fetchHosts: ['comfy.test'],
+    fetch: async (input, init) => {
+      const url = new URL(input)
+      calls.push({ path: url.pathname, method: init?.method || 'GET' })
+      if (url.pathname === '/history/original-provider-id') return Response.json({ 'original-provider-id': { status: { completed: true }, outputs: { '2': { images: [{ filename: 'image.png' }] } } } })
+      if (url.pathname === '/view') return new Response(Buffer.from(png, 'base64'), { headers: { 'content-type': 'image/png' } })
+      return Response.json({ queue_running: [], queue_pending: [] })
+    },
+  })
+  assert.equal((await f.request('jobs?id=' + id, undefined, 'GET')).body.job.state, 'cancelled')
+  assert.equal(calls.length, 0)
+  const result = await f.request('media-action', { operation: 'recover', gameId: current.gameId, turn: 1, textVersion: 'v1', mediaId: 'cancelled-media', jobId: id })
+  assert.equal(result.status, 200, result.body.error)
+  await untilRuntime(() => media[0].data.replacement?.state === 'ready')
+  assert.equal(media[0].attachment.id, 'recovered-attachment')
+  assert.equal(media.length, 1)
+  assert.ok(calls.some(call => call.path === '/history/original-provider-id'))
+  assert.ok(calls.every(call => call.method === 'GET'), 'recovery must never submit a new prompt')
+})
+
 test('media-action route redrawing uses the official same-version appearance snapshot', async t => {
   const current = { gameId: 'media-snapshot-game', turn: 1, textVersion: 'text-v1', text: 'A portrait.' }
   const saved = { textVersion: 'text-v1', data: { characters: { luna: { traits: { face: 'short white hair, blue eyes' } } }, changes: [] } }

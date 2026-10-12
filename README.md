@@ -4,7 +4,14 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
-2.5.1 修正了提前点击生图、中文提示词和离线安装包的几个问题。全新安装与旧版升级都看下方「安装与第一次出图」。
+2.5.2 根据使用反馈修正了取消后的操作入口、工作流提示词绑定和安装路径识别，并调整了画风、世界书页面的文字与背景配色。安装方法见下方「安装与第一次出图」。
+
+## 2.5.2 更新
+
+- **取消后仍能操作原来的插图位置。** 没有图片时显示可点的占位，点击、右键或长按可以打开提示词编辑器。已确认失败或未提交的取消任务可以原位重画；平台可能仍在生成时保留重画限制，避免重复扣费。有任务查询接口的渠道可以重新查询原任务，找回图片。
+- **提示词位置认得更全。** 工作流里写提示词的节点不再只认 `CLIPTextEncode`：现在会顺着连线回溯到真正能写字的那一格（例如「正向编码 → 全局主体提示词（Text Multiline）」），兜底也认 Text Multiline / String Literal / PrimitiveNode 等文本节点，并使用节点真实的输入名；同一目标不会重复登记。
+- **安装器适配非标准数据目录。** 一键包或改版把数据放在别处（根目录下直接就是 `profiles`，没有 `.dsh` 这一层）时，安装器会自己找（`-DshHome` / `-Root` / `DSH_HOME` / 常见位置 / 各固定磁盘常见目录），找不到会列出找过的全部位置；传根目录、`profiles` 目录或 `profiles\<profile>` 目录都能自动识别。另加 `-NoRegister`：只放源码，不碰对方的插件登记。
+- **画风和世界书的文字更清楚。** 相关面板明确设置文字与背景颜色，避免浅色宿主背景透进来；世界书编辑后收起也保持相同配色。
 
 ## 2.5.1 更新
 
@@ -17,7 +24,7 @@
 
 ## 2.5.0 更新
 
-- **安装器不再把人卡死**：注册失败时会自动回滚，不再把半成品目录留在 `data/tools` 下（留着会让下次安装被「目标目录已存在」挡住）；检测到指向已删除目录的失效登记时会放行重装；目标目录已存在时会给出可复制的处理命令；顺手清理残留的暂存目录。
+- **安装器不再把人卡死**：注册失败时会自动回滚，不再把半成品目录留在 `data/tools` 下（留着会让下次安装被「目标目录已存在」挡住）；检测到指向已删除目录的失效登记时会放行重装；目标目录已存在时会给出可复制的处理命令。2.5.2 起发现其他暂存目录会停止并提示检查，避免误删同时运行的安装。
 - **正文插图不再挂一排按钮**：出图后图下方保持干净，左键看大图、右键或长按打开提示词编辑器（改提示词、换渠道、重画都在里面）；生成中、失败、状态待确认时仍保留对应按钮。
 - **世界书支持按需注入**：每条规则可选常驻或关键词触发，并限定生效渠道；规划页可以看到本轮纳入了哪些规则、排除了哪些及原因。
 
@@ -41,7 +48,7 @@
 
 安装器默认使用 `%USERPROFILE%\.dsh` 下的 `tavern` Profile；可通过 `-Profile` 指定另一个**已经存在**的 Profile。安装器只安装插件源码，不运行仓库脚本；它调用 DSH 官方 CLI 的 `plugin add`，附带 `--ignore-scripts`，由 DSH 将依赖、`node_modules` 链接和 bundle 一起登记。若 `tools/dsh-tavern-image` 或 Profile 中已有同名依赖，安装器会停止，不覆盖已有内容；更新已安装插件请用插件自己的更新页。
 
-**推荐：下载 [2.5.1 发布页](https://github.com/weixinlll/dsh-tavern-image/releases/tag/v2.5.1)里的 `dsh-tavern-image-2.5.1-install.zip`。** 解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。
+**推荐：下载 [2.5.2 发布页](https://github.com/weixinlll/dsh-tavern-image/releases/tag/v2.5.2)里的 `dsh-tavern-image-2.5.2-install.zip`。** 解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。
 
 也可以在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master) 后，可以在 PowerShell 中指定文件：
 
@@ -49,7 +56,31 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\install-plugin.ps1" -SourceArchive "$env:USERPROFILE\Downloads\dsh-tavern-image-master.zip"
 ~~~
 
-ZIP 顶层即使多套几层目录也能识别。安装器只复制插件包白名单，不复制 Git 历史、测试、`config.json`、`definitions.json`、世界书、缓存、任务记录或用户工作流。若已解压仓库，也可以传入 `-SourceDirectory`，安装器仍会逐个筛选允许的包文件。
+ZIP 顶层即使多套几层目录也能识别。
+
+### 一键包 / 改版 DSH 的安装位置
+
+有些一键包或改版把 DSH 数据放在别处，而且**根目录下面直接就是 `profiles` 文件夹**（没有 `.dsh` 这一层），例如 `D:\dsh\profiles\tavern`。安装器会自己找：
+
+- 依次尝试：`-DshHome`（别名 `-Root`）→ 环境变量 `DSH_HOME` → `%USERPROFILE%\.dsh`、`%USERPROFILE%\dsh`、`%LOCALAPPDATA%\dsh`、`%APPDATA%\dsh` → 各固定磁盘根下的 `.dsh` / `dsh` / `DSH` / `dsh-tavern`
+- 找不到时会把**找过的位置全部列出来**，并给出可直接复制的命令；安装开始时会打印最终选定的数据目录
+- 手动指定时下面三种层级任选，都能自动识别成同一个数据目录：
+
+~~~powershell
+# 三种写法等价
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -DshHome "D:\dsh"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -Root "D:\dsh\profiles"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -Root "D:\dsh\profiles\tavern"
+# 指定另一个已存在的 Profile
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -DshHome "D:\dsh" -Profile other
+~~~
+
+如果那个环境不用标准 DSH CLI 管理插件，加 `-NoRegister`：安装器只把源码放进 `profile-data\<profile>\data\tools\dsh-tavern-image`，不再调用官方 CLI，由你按该环境自己的方式启用（登记 link、加进插件清单等），然后完整重启 DSH。
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install-plugin.ps1" -DshHome "D:\dsh" -NoRegister
+~~~
+安装器只复制插件包白名单，不复制 Git 历史、测试、`config.json`、`definitions.json`、世界书、缓存、任务记录或用户工作流。若已解压仓库，也可以传入 `-SourceDirectory`，安装器仍会逐个筛选允许的包文件。
 
 有网络时，不带来源参数会先试官方 codeload，再试 GitHub Archive：
 
@@ -296,7 +327,7 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 
 ## 兼容与许可
 
-当前版本 **2.5.1**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
+当前版本 **2.5.2**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
 
 为保留现有 DSH 安装的包解析兼容，包名和浏览器模块加载键仍使用 `dsh-tavern-comfy`；插件 ID、主接口前缀和新安装目录使用 `dsh-tavern-image`。
 

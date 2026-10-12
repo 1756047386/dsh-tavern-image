@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path'
 
 const execFileAsync = promisify(execFile)
 const root = resolve(import.meta.dirname, '..')
+const sourceManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const packager = join(root, 'scripts', 'Package-DshTavernImage.ps1')
 const powershell = process.env.POWERSHELL_EXE || 'powershell.exe'
 
@@ -18,7 +19,7 @@ async function runPowerShell(args) {
   })
 }
 
-test('published offline packager creates a clean 2.5.1 installer bundle', async t => {
+test('published offline packager creates a clean installer bundle matching the source version', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell packaging tests run on Windows')
 
   const directory = await mkdtemp(join(tmpdir(), 'dsh-tavern-image-package-test-'))
@@ -42,7 +43,7 @@ test('published offline packager creates a clean 2.5.1 installer bundle', async 
 
   const packageRoot = join(sourceExtracted, 'dsh-tavern-image')
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '2.5.1')
+  assert.equal(manifest.version, sourceManifest.version)
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   assert.ok(await stat(join(packageRoot, 'scripts', 'install-plugin.ps1')))
   assert.ok(await stat(join(packageRoot, 'scripts', 'Install-DshTavernImage.cmd')))

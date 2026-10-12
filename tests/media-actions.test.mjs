@@ -31,7 +31,7 @@ function fixture({ media = [source()], jobs = {}, start, cancel, refresh, delay 
     tavern,
     attachments: { async saveImage(value) { return { id: 'new-attachment-' + starts.length, mediaType: value.mediaType } } },
     getJob: async id => jobs[id] || null,
-    refreshJob: async id => refresh?.(id, jobs),
+    refreshJob: async (id, options) => refresh?.(id, jobs, options),
     startReplacement: async args => {
       starts.push(args)
       if (start) return start(args, starts.length)
@@ -235,6 +235,62 @@ test('confirmed read-only recovery publishes a known completed job without a new
   assert.equal(f.starts.length, 0)
   assert.equal(f.state.media[0].data.jobId, 'old-job')
   assert.notEqual(f.state.media[0].attachment.id, 'old-attachment')
+})
+
+test('explicit recovery queries a cancelled submitted task and publishes in the same slot without resubmission', async () => {
+  const jobs = { 'old-job': { state: 'cancelled', requestStarted: true } }
+  const f = fixture({ jobs, refresh: async (id, all, options) => {
+    assert.equal(options.recoverCancelled, true)
+    all[id] = { state: 'done', file: 'recovered-file', mediaType: 'image/png' }
+  } })
+  await f.actions.handle(request({ operation: 'recover' }))
+  await until(() => f.state.media[0].data.replacement?.state === 'ready')
+  assert.equal(f.starts.length, 0)
+  assert.equal(f.state.media.length, 1)
+})
+
+test('cancelled recovery without a queryable task reports the limitation without submitting', async () => {
+  const jobs = { 'old-job': { state: 'cancelled', requestStarted: true } }
+  const f = fixture({ jobs, refresh: async () => { throw new Error('没有可查询的平台任务号') } })
+  await assert.rejects(f.actions.handle(request({ operation: 'recover' })), /没有可查询的平台任务号/)
+  assert.equal(f.starts.length, 0)
+  assert.equal(jobs['old-job'].state, 'cancelled')
+})
+
+test('cancelled recovery with unfinished provider task retains billing risk and blocks redraw', async () => {
+  const jobs = { 'old-job': { state: 'cancelled', requestStarted: true } }
+  const f = fixture({ jobs, refresh: async () => {} })
+  const result = await f.actions.handle(request({ operation: 'recover' }))
+  assert.equal(result.state, 'cancelled')
+  assert.equal(result.cancelMayHaveContinued, true)
+  await assert.rejects(f.actions.handle(request()), /平台请求可能仍在处理/)
+  assert.equal(f.starts.length, 0)
+})
+
+test('a cancelled replacement cannot bypass its billing risk through the original failed job', async () => {
+  const jobs = { 'old-job': { state: 'failed' }, 'replacement': { state: 'cancelled', requestStarted: true } }
+  const f = fixture({ jobs, media: [source({ data: { jobId: 'old-job', replacement: { jobId: 'replacement', state: 'cancelled' } } })] })
+  await assert.rejects(f.actions.handle(request()), /平台请求可能仍在处理/)
+  assert.equal(f.starts.length, 0)
+})
+
+test('simultaneous read-only recovery shares one query and publishes once', async () => {
+  let queries = 0, release
+  const gate = new Promise(resolve => { release = resolve })
+  const jobs = { 'old-job': { state: 'cancelled', requestStarted: true } }
+  const f = fixture({ jobs, refresh: async (id, all) => {
+    queries++
+    await gate
+    all[id] = { state: 'done', file: 'recovered-file', mediaType: 'image/png' }
+  } })
+  const first = f.actions.handle(request({ operation: 'recover' }))
+  const second = f.actions.handle(request({ operation: 'recover' }))
+  await until(() => queries === 1)
+  release()
+  assert.deepEqual(await first, await second)
+  await until(() => f.state.media[0].data.replacement?.state === 'ready')
+  assert.equal(queries, 1)
+  assert.equal(f.starts.length, 0)
 })
 
 test('rejected cancellation preserves the old image and uncertain state against task cleanup race', async () => {

@@ -26,6 +26,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
   let state = { config: {}, workflows: [], outfits: [], definitions: { characters: copy(characters), outfits: [] }, tasks: [{ id: 'task', state: 'running', startedAt: Date.now() }] }
   const requests = []
   const intervals = []
+  const timeouts = []
   const React = {
     Fragment: 'fragment',
     createElement(type, props, ...children) { return { type, props: props || {}, children: children.flat(Infinity) } },
@@ -50,7 +51,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     confirm: () => true,
     URL, console, Date, Math, Promise, TypeError,
     setInterval(callback) { intervals.push(callback); return intervals.length }, clearInterval() {},
-    setTimeout() { return 1 }, clearTimeout() {},
+    setTimeout(callback, delay) { timeouts.push({ callback, delay }); return timeouts.length }, clearTimeout() {},
     async fetch(url, init = {}) {
       const parsedUrl = new URL(url)
       const path = parsedUrl.pathname.split('/').at(-1)
@@ -111,7 +112,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     await ready()
     button('插件更新').props.onClick(); render(); await flush(); render()
   }
-  return { React, api, moduleId, ready, openPluginUpdate, render, renderComponent, button, input, role, roleInput, rolePanels, nodes, text, intervals, requests, get state() { return state } }
+  return { React, api, moduleId, ready, openPluginUpdate, render, renderComponent, button, input, role, roleInput, rolePanels, nodes, text, intervals, timeouts, requests, get state() { return state } }
 }
 
 test('client module registration matches the package key DSH uses to load it', () => {
@@ -146,6 +147,116 @@ test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 cap
   assert.equal(ui.nodes(image).filter(node => node.type === 'img')[0].props.alt, '[客籍关前验魂灰]')
   assert.equal(ui.text(image), '')
   assert.equal(ui.nodes(image).some(node => node.type === 'button'), false)
+})
+
+test('失败占位支持点击、右键和长按打开提示词编辑器', async () => {
+  const ui = harness({ 'job-detail': () => ({ ok: true, job: { id: 'job-failed-placeholder', rawPrompt: '原提示词', state: 'failed' } }) })
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const props = { gameId: 'game-placeholder', turn: 11, item: { id: 'media-placeholder', textVersion: 'text-v11', status: 'failed', caption: '当前图片', error: '生成失败', data: { jobId: 'job-failed-placeholder' } } }
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const placeholder = ui.nodes(tree).find(node => node.props.key === 'illustration-placeholder')
+  assert.ok(placeholder)
+  assert.match(ui.text(placeholder), /点这里改提示词重画/)
+
+  placeholder.props.onClick()
+  await flush()
+  let editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  assert.equal(ui.nodes(editor).find(node => node.type === 'textarea')?.props.value, '原提示词')
+
+  let prevented = false
+  let stopped = false
+  placeholder.props.onContextMenu({ preventDefault() { prevented = true }, stopPropagation() { stopped = true } })
+  assert.equal(prevented, true)
+  assert.equal(stopped, true)
+  await flush()
+  ui.renderComponent(ui.api.__test.PromptEditor)
+
+  placeholder.props.onTouchStart()
+  const longPress = ui.timeouts.findLast(timer => timer.delay === 550)
+  assert.ok(longPress)
+  longPress.callback()
+  await flush()
+  editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  assert.equal(ui.nodes(editor).find(node => node.type === 'textarea')?.props.value, '原提示词')
+})
+
+test('平台可能仍在生成的取消保持重画锁，直到只读查询确认终态', async () => {
+  const ui = harness({
+    'media-action': ({ body }) => body.operation === 'cancel'
+      ? ({ ok: true, jobId: body.jobId, state: 'cancelled', requestStarted: true, cancelMayHaveContinued: true })
+      : ({ ok: true, jobId: body.jobId, state: 'done' }),
+    'job-detail': ({ query }) => ({ ok: true, job: { id: query.id, state: 'cancelled', requestStarted: true } }),
+  })
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const props = { gameId: 'game-cancel-retry', turn: 12, item: { id: 'media-cancel-retry', textVersion: 'text-v12', status: 'pending', data: { jobId: 'job-cancel-retry' } } }
+  let tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '取消这张图').props.onClick()
+  assert.equal(ui.api.__test.hasUncertainMediaAction('media-cancel-retry'), true)
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.ok(ui.nodes(tree).some(node => node.type === 'button' && ui.text(node) === '重新查询状态'))
+  const imageOrPlaceholder = ui.nodes(tree).find(node => node.type === 'img') || ui.nodes(tree).find(node => node.props.key === 'illustration-placeholder')
+  imageOrPlaceholder.props.onContextMenu({ preventDefault() {}, stopPropagation() {} })
+  await flush()
+  const editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const redraw = ui.nodes(editor).find(node => node.type === 'button' && /用这段重画/.test(ui.text(node)))
+  assert.ok(redraw)
+  assert.equal(redraw.props.disabled, true)
+  assert.equal(ui.requests.filter(request => request.path === 'media-action').length, 1)
+  await ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重新查询状态').props.onClick()
+  const actions = ui.requests.filter(request => request.path === 'media-action')
+  assert.deepEqual(actions.map(request => request.body.operation), ['cancel', 'recover'])
+})
+
+test('恢复仍返回有风险的 cancelled 时，job-detail 轮询也不会解开重画锁', async () => {
+  const ui = harness({
+    'media-action': ({ body }) => ({ ok: true, jobId: body.jobId, state: 'cancelled', requestStarted: true, cancelMayHaveContinued: true }),
+    'job-detail': ({ query }) => ({ ok: true, job: { id: query.id, rawPrompt: '原提示词', state: 'cancelled', requestStarted: true, cancelMayHaveContinued: true } }),
+  })
+  ui.renderComponent(ui.api.__test.PromptEditor)
+  const props = {
+    gameId: 'game-cancel-unconfirmed', turn: 13,
+    item: { id: 'media-cancel-unconfirmed', textVersion: 'text-v13', status: 'ready', url: '/old.png', data: { jobId: 'job-cancel-unconfirmed', replacement: { jobId: 'job-cancel-unconfirmed', state: 'cancelled', requestStarted: true, cancelMayHaveContinued: true } } },
+  }
+  let tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await flush()
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const recover = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重新查询状态')
+  assert.ok(recover)
+  await recover.props.onClick()
+  assert.equal(ui.api.__test.hasUncertainMediaAction('media-cancel-unconfirmed'), true)
+
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await flush()
+  tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.equal(ui.api.__test.hasUncertainMediaAction('media-cancel-unconfirmed'), true)
+  ui.nodes(tree).find(node => node.type === 'img').props.onContextMenu({ preventDefault() {}, stopPropagation() {} })
+  await flush()
+  const editor = ui.renderComponent(ui.api.__test.PromptEditor)
+  const redraw = ui.nodes(editor).find(node => node.type === 'button' && /用这段重画/.test(ui.text(node)))
+  assert.ok(redraw)
+  assert.equal(redraw.props.disabled, true)
+  assert.equal(ui.requests.filter(request => request.path === 'media-action').length, 1)
+})
+
+test('画风预设和展开的世界书编辑器使用明确的深色表面与可读文字', async () => {
+  const ui = harness({
+    state: ({ state }) => ({ ...copy(state), config: { stylePresets: [{ id: 'p1', name: '夜景', artist: 'cinematic', negative: '', enabled: true }], activePreset: 'p1' }, worldbook: [{ index: 0, enabled: true, comment: '测试条目', content: '规则内容', length: 4, activation: 'always' }] }),
+  })
+  await ui.ready()
+  ui.button('画风').props.onClick(); ui.render()
+  let presetTree = ui.render()
+  const presetCard = ui.nodes(presetTree).find(node => node.type === 'div' && node.props.key === 'p1')
+  assert.equal(presetCard.props.style.background, '#1b2a3e')
+  assert.equal(presetCard.props.style.color, '#e8edf5')
+
+  ui.button('世界书').props.onClick(); ui.render()
+  const edit = ui.nodes(ui.render()).find(node => node.type === 'button' && ui.text(node) === '编辑')
+  edit.props.onClick(); const worldbookTree = ui.render()
+  const entryCard = ui.nodes(worldbookTree).find(node => node.props.style?.background === '#1a2029')
+  assert.ok(entryCard)
+  const editorArea = ui.nodes(entryCard).find(node => node.type === 'textarea')
+  assert.equal(editorArea.props.style.background, '#1a2029')
+  assert.equal(editorArea.props.style.color, '#e8edf5')
 })
 
 test('官方媒体渲染器在上下文无效时禁用单图操作，并保留旧图显示替换状态', () => {
