@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { IMAGE_PROVIDERS, generateImage, testImageChannel } from '../lib/image-providers.js'
+import { IMAGE_PROVIDERS, USER_AGENT, generateImage, testImageChannel } from '../lib/image-providers.js'
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0])
 const b64 = png.toString('base64')
@@ -197,8 +197,35 @@ test('testImageChannel uses only a safe read-only model probe and generation-fre
   assert.equal(result.status, 'reachable')
   assert.deepEqual(result.models, ['img-model'])
   assert.equal(safe.calls[0].method, 'GET')
-  const configured = await testImageChannel(channel('novelai'), { fetchImpl: async () => { throw new Error('must not call') } })
+  const configured = await testImageChannel(channel('seedream'), { fetchImpl: async () => { throw new Error('must not call') } })
   assert.equal(configured.status, 'configured')
+})
+
+test('testImageChannel safely probes NovelAI subscription endpoint with User-Agent header', async () => {
+  const probe = mockFetch(() => json({ tier: 3, anlas: 10000 }))
+  const result = await testImageChannel(channel('novelai', { baseUrl: 'https://image.novelai.net' }), { fetchImpl: probe.fetchImpl })
+  assert.equal(result.status, 'reachable')
+  assert.equal(result.ok, true)
+  assert.equal(result.message, '连接正常。')
+  assert.equal(probe.calls.length, 1)
+  assert.equal(probe.calls[0].method, 'GET')
+  assert.equal(probe.calls[0].url, 'https://image.novelai.net/user/subscription')
+  assert.equal(probe.calls[0].headers.authorization, 'Bearer top-secret')
+  assert.equal(probe.calls[0].headers['user-agent'], USER_AGENT)
+})
+
+test('testImageChannel honors custom testPath for NovelAI reverse proxy', async () => {
+  const probe = mockFetch(() => json({ active: true }))
+  const result = await testImageChannel(channel('novelai', { baseUrl: 'https://proxy.test', options: { testPath: '/ai/user/subscription' } }), { fetchImpl: probe.fetchImpl })
+  assert.equal(result.status, 'reachable')
+  assert.equal(result.ok, true)
+  assert.equal(probe.calls[0].url, 'https://proxy.test/ai/user/subscription')
+})
+
+test('requestHeaders includes User-Agent on generation requests', async () => {
+  const zip = storedZip('result.png', png), { fetchImpl, calls } = mockFetch(() => new Response(zip))
+  await generateImage(channel('novelai', { baseUrl: 'https://image.test' }), request, { fetchImpl })
+  assert.equal(calls[0].headers['user-agent'], USER_AGENT)
 })
 
 test('external image URLs receive neither bearer nor Basic credentials', async () => {
