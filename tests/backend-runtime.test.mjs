@@ -677,6 +677,124 @@ test('external images return jobs immediately, honor concurrency, deduplicate pa
   assert.equal((await readFile(join(f.root, 'jobs-store.json'), 'utf8')).includes('fixture-secret'), false)
 })
 
+test('ComfyUI connection refusal is retryable and a failed key can submit a fresh job', async t => {
+  let promptCalls = 0
+  const f = await runtime(t, async function* () {}, {}, {
+    config: { comfyUrl: 'http://comfy.test' },
+    fetchHosts: ['comfy.test'],
+    fetch: async input => {
+      const url = new URL(input)
+      if (url.pathname === '/prompt') {
+        promptCalls++
+        if (promptCalls === 1) {
+          const error = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+          throw error
+        }
+        return Response.json({ prompt_id: 'comfy-after-retry' })
+      }
+      return Response.json({ queue_running: [], queue_pending: [] })
+    },
+  })
+  const input = { tag: 'portrait', key: 'retry-after-refusal' }
+  const first = await f.request('jobs', input)
+  assert.equal(first.body.status, 'failed')
+  assert.equal(first.body.requestMayHaveSucceeded, false)
+  assert.match(first.body.error, /fetch failed/)
+
+  const retried = await f.request('jobs', input)
+  assert.equal(retried.body.status, 'pending')
+  assert.notEqual(retried.body.id, first.body.id)
+  assert.equal(promptCalls, 2)
+})
+
+test('ComfyUI classifies aggregate connection errors only when every path failed before connect', async t => {
+  let promptCalls = 0
+  const f = await runtime(t, async function* () {}, {}, {
+    config: { comfyUrl: 'http://comfy.test' },
+    fetchHosts: ['comfy.test'],
+    fetch: async (input, init) => {
+      if (new URL(input).pathname !== '/prompt') return Response.json({ queue_running: [], queue_pending: [] })
+      promptCalls++
+      const cause = promptCalls === 1
+        ? new AggregateError(['ECONNREFUSED', 'ENETUNREACH'].map(code => Object.assign(new Error(code), { code })), 'connection attempts failed')
+        : promptCalls === 2
+          ? new AggregateError(['ECONNREFUSED', 'ECONNRESET'].map(code => Object.assign(new Error(code), { code })), 'connection attempts failed')
+          : new AggregateError([Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' }), new Error('unknown transport failure')], 'connection attempts failed')
+      throw new TypeError('fetch failed', { cause })
+    },
+  })
+  const definitelyNotSent = await f.request('jobs', { tag: 'first', key: 'all-preconnect-errors' })
+  assert.equal(definitelyNotSent.body.status, 'failed')
+  assert.equal(definitelyNotSent.body.requestMayHaveSucceeded, false)
+
+  const ambiguous = await f.request('jobs', { tag: 'second', key: 'mixed-connect-errors' })
+  assert.equal(ambiguous.body.status, 'uncertain')
+  assert.equal(ambiguous.body.requestMayHaveSucceeded, true)
+
+  const unknownLeaf = await f.request('jobs', { tag: 'third', key: 'unknown-aggregate-leaf' })
+  assert.equal(unknownLeaf.body.status, 'uncertain')
+  assert.equal(unknownLeaf.body.requestMayHaveSucceeded, true)
+})
+
+test('an ambiguous ComfyUI POST response can be recovered by its persisted client prompt_id without resubmitting', async t => {
+  let promptId = ''
+  let promptCalls = 0
+  const f = await runtime(t, async function* () {}, {}, {
+    config: { comfyUrl: 'http://comfy.test' },
+    fetchHosts: ['comfy.test'],
+    fetch: async (input, init) => {
+      const url = new URL(input)
+      if (url.pathname === '/prompt') {
+        promptCalls++
+        promptId = JSON.parse(init.body).prompt_id
+        throw new TypeError('fetch failed', { cause: Object.assign(new Error('connection reset after send'), { code: 'ECONNRESET' }) })
+      }
+      if (url.pathname === '/history/' + promptId) {
+        return Response.json({ [promptId]: { status: { completed: true }, outputs: { '2': { images: [{ filename: 'recovered.png' }] } } } })
+      }
+      if (url.pathname === '/view') return new Response(Buffer.from(png, 'base64'), { headers: { 'content-type': 'image/png' } })
+      return Response.json({ queue_running: [], queue_pending: [] })
+    },
+  })
+  const started = await f.request('jobs', { tag: 'portrait', key: 'ambiguous-comfy-post' })
+  assert.equal(started.body.status, 'uncertain')
+  assert.match(started.body.comfyId, /^[0-9a-f-]{36}$/i)
+  await delay(50)
+  assert.equal(JSON.parse(await readFile(join(f.root, 'jobs-store.json'), 'utf8'))[started.body.id].comfyId, started.body.comfyId)
+
+  const recovered = await f.request('jobs?id=' + started.body.id, undefined, 'GET')
+  assert.equal(recovered.body.job.status, 'done')
+  assert.equal(recovered.body.job.comfyId, promptId)
+  assert.equal(promptCalls, 1)
+})
+
+test('an in-flight ComfyUI submission is not marked uncertain by an empty early queue read', async t => {
+  const releaseSubmit = deferred()
+  let promptId = ''
+  const f = await runtime(t, async function* () {}, {}, {
+    config: { comfyUrl: 'http://comfy.test' },
+    fetchHosts: ['comfy.test'],
+    fetch: async (input, init) => {
+      const url = new URL(input)
+      if (url.pathname === '/prompt') {
+        promptId = JSON.parse(init.body).prompt_id
+        await releaseSubmit.promise
+        return Response.json({ prompt_id: promptId })
+      }
+      return Response.json({ queue_running: [], queue_pending: [] })
+    },
+  })
+  const pendingRequest = f.request('jobs', { tag: 'portrait', key: 'slow-comfy-submit' })
+  await untilRuntime(async () => (await f.request('history', undefined, 'GET')).body.jobs.length === 1)
+  const id = (await f.request('history', undefined, 'GET')).body.jobs[0].id
+  const duringSubmit = await f.request('jobs?id=' + id, undefined, 'GET')
+  assert.equal(duringSubmit.body.job.status, 'pending')
+  releaseSubmit.resolve()
+  const submitted = await pendingRequest
+  assert.equal(submitted.body.status, 'pending')
+  assert.equal(submitted.body.comfyId, promptId)
+})
+
 test('optional JPEG output converts external channel PNGs before caching and reports matching metadata', async t => {
   const f = await runtime(t, async function* () {}, {}, { config: { ...imageConfig, jpegOutput: true, jpegQuality: 87 }, fetch: async () => new Response(JSON.stringify({ data: [{ b64_json: pngBytes.toString('base64') }] }), { headers: { 'content-type': 'application/json' } }) })
   const started = await f.request('jobs', { tag: 'sky', key: 'jpeg-output', size: '512x512' })
@@ -789,6 +907,47 @@ test('cancelled ComfyUI task stays cancelled during polling and explicit recover
   assert.equal(media.length, 1)
   assert.ok(calls.some(call => call.path === '/history/original-provider-id'))
   assert.ok(calls.every(call => call.method === 'GET'), 'recovery must never submit a new prompt')
+})
+
+test('a ComfyUI refusal can be retried or redrawn through the official single-image media action', async t => {
+  for (const operation of ['retry', 'redraw']) {
+    const current = { gameId: 'comfy-media-retry', turn: 1, textVersion: 'v1', text: 'A portrait.' }
+    const media = []
+    let promptCalls = 0
+    const tavern = {
+      apiVersion: 2,
+      promptSection() { return () => {} }, onTurnSettled() { this.bridgeReady = true; return () => {} },
+      onTimelineChanged() { return () => {} }, onGameRemoved() { return () => {} },
+      async getTurn() { return current }, async list() { return media },
+      async attach() { return { id: 'unused' } }, async update(id, patch) { Object.assign(media.find(item => item.id === id), patch) },
+    }
+    const f = await runtime(t, async function* () {}, {}, {
+      tavern, attachments: { async saveImage() { return { id: 'retry-attachment' } } },
+      config: { comfyUrl: 'http://comfy.test' }, fetchHosts: ['comfy.test'],
+      fetch: async (input, init) => {
+        const url = new URL(input)
+        if (url.pathname === '/prompt') {
+          promptCalls++
+          if (promptCalls === 1) throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+          return Response.json({ prompt_id: JSON.parse(init.body).prompt_id })
+        }
+        if (url.pathname.startsWith('/history/')) return Response.json({ [url.pathname.split('/').at(-1)]: { status: { completed: true }, outputs: { '2': { images: [{ filename: 'retry.png' }] } } } })
+        if (url.pathname === '/view') return new Response(Buffer.from(png, 'base64'), { headers: { 'content-type': 'image/png' } })
+        return Response.json({ queue_running: [], queue_pending: [] })
+      },
+    })
+    const first = await f.request('jobs', { tag: 'portrait', key: 'source-for-media-retry', sessionId: current.gameId, turn: 1, textVersion: 'v1' })
+    assert.equal(first.body.status, 'failed')
+    media.push({ id: 'media-comfy-retry', kind: 'dsh-tavern-image/image', gameId: current.gameId, turn: 1, textVersion: 'v1', status: 'failed', data: { jobId: first.body.id } })
+
+    const action = await f.request('media-action', { operation, gameId: current.gameId, turn: 1, textVersion: 'v1', mediaId: 'media-comfy-retry', jobId: first.body.id, ...(operation === 'redraw' ? { prompt: 'portrait with a blue coat' } : {}) })
+    assert.equal(action.status, 200, action.body.error)
+    await f.request('jobs?id=' + action.body.jobId, undefined, 'GET')
+    await untilRuntime(() => media[0].data.replacement?.state === 'ready', 5000)
+    assert.equal(promptCalls, 2)
+    assert.equal(media[0].attachment.id, 'retry-attachment')
+    assert.equal(media[0].status, 'ready')
+  }
 })
 
 test('media-action route redrawing uses the official same-version appearance snapshot', async t => {

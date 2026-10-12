@@ -299,9 +299,16 @@ let openImageOverlay = null
             if (cancelled) return
             if (found?.job) {
               if (found.job.status === 'done') { setJobId(found.job.id); setState('done'); return }
-              if (found.job.status === 'failed') { setState('failed'); setError(found.job.error || '画失败了'); return }
-              poll(found.job.id)
-              return
+              // A terminal failure is safe to retry with the same key. The
+              // server replaces failed jobs on POST while retaining dedupe for
+              // active and completed jobs.
+              if (found.job.status === 'failed') {
+                if (attempt === 0) { setState('failed'); setError(found.job.error || '画失败了'); return }
+                // An explicit retry click increments attempt and submits fresh.
+              } else {
+                poll(found.job.id)
+                return
+              }
             }
             const created = await jsonFetch(`${BASE}/jobs`, {
               method: 'POST',
@@ -425,8 +432,9 @@ let openImageOverlay = null
       const [actionBusy, setActionBusy] = useState(false)
       const [polledJob, setPolledJob] = useState(null)
       const [actionJobId, setActionJobId] = useState('')
+      const activeActionJobId = React.useRef('')
 
-      useEffect(() => { setPolledJob(null); setActionJobId('') }, [item && item.id])
+      useEffect(() => { activeActionJobId.current = ''; setPolledJob(null); setActionJobId('') }, [item && item.id])
       const effectiveJobId = String(actionJobId || activeJobId)
 
       // Poll only this media item's active job. GET is safe to retry; paid POSTs below are single-flight.
@@ -437,7 +445,7 @@ let openImageOverlay = null
         let live = true
         const poll = () => jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(effectiveJobId), { cache: 'no-store' })
           .then(result => {
-            if (!live || !result || !result.job) return
+            if (!live || (activeActionJobId.current && activeActionJobId.current !== effectiveJobId) || !result || !result.job) return
             setPolledJob(result.job)
             const providerMayStillBeWorking = result.job.requestMayHaveSucceeded === true || (result.job.state === 'cancelled' && (result.job.requestStarted === true || result.job.cancelMayHaveContinued === true))
             if (String(result.job.id || '') === effectiveJobId && ['done', 'ready', 'failed', 'cancelled'].includes(result.job.state) && !providerMayStillBeWorking) mediaUncertainActions.delete(mediaContext.mediaId)
@@ -462,6 +470,7 @@ let openImageOverlay = null
           })
           if (!result?.ok) throw new Error(result?.error || '请求未确认')
           const nextJobId = String(result.jobId || effectiveJobId)
+          activeActionJobId.current = nextJobId
           setActionJobId(nextJobId)
           setPolledJob({ ...(polledJob || {}), ...result, id: nextJobId, state: result.state || (operation === 'cancel' ? 'cancelled' : 'pending') })
           const providerMayStillBeWorking = result.requestMayHaveSucceeded === true || (result.state === 'cancelled' && (result.cancelMayHaveContinued === true || result.requestStarted === true))
@@ -501,14 +510,17 @@ let openImageOverlay = null
       const displayJobId = recoveredReady ? effectiveJobId : jobId
       const displayMediaContext = { ...mediaContext, jobId: displayJobId }
       const activeReplacement = replacement && !recoveredReady
+      const cachedImageReady = ['done', 'ready'].includes(String(currentPolledJob && currentPolledJob.state || replacement && replacement.state || ''))
+        || String(item && item.status || '') === 'ready'
       const src = recoveredReady
         ? BASE + '/jobs?id=' + encodeURIComponent(effectiveJobId) + '&image=1'
-        : String(item && item.url || '') || (jobId && !(item && item.status === 'failed') && !(item && item.data && item.data.cancelled === true) ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
+        : String(item && item.url || '') || (cachedImageReady && jobId && !(item && item.status === 'failed') && !(item && item.data && item.data.cancelled === true) ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
       const jobMayHaveReachedProvider = Boolean(currentPolledJob && (currentPolledJob.requestMayHaveSucceeded === true || currentPolledJob.state === 'uncertain'))
       const isUncertain = Boolean((currentPolledJob && currentPolledJob.state === 'uncertain') || jobMayHaveReachedProvider || (replacement && replacement.state === 'uncertain' && !recoveredReady))
       const isCancelled = !recoveredReady && (Boolean(item && item.data && item.data.cancelled === true) || Boolean(currentPolledJob && currentPolledJob.state === 'cancelled') || Boolean(replacement && replacement.state === 'cancelled'))
       const taskState = recoveredReady ? 'done' : isUncertain ? 'uncertain' : isCancelled ? 'cancelled' : String(currentPolledJob && currentPolledJob.state || replacement && replacement.state || (item && item.status === 'failed' ? 'failed' : item && item.status === 'pending' ? 'pending' : 'done'))
       const cancellationMayContinue = Boolean((item && item.data && item.data.cancelMayHaveContinued === true) || (replacement && (replacement.cancelMayHaveContinued === true || replacement.requestStarted === true)) || (currentPolledJob && currentPolledJob.state === 'cancelled' && currentPolledJob.requestStarted === true))
+      const queryUnavailable = Boolean(currentPolledJob && currentPolledJob.state === 'uncertain' && currentPolledJob.backend === 'comfyui' && !currentPolledJob.comfyId)
       const statusLabel = ({ queued: '排队中', pending: '排队中', running: '生成中', processing: '生成中', done: '完成', ready: '完成', failed: '失败', cancelled: '已取消', uncertain: '状态待确认' })[taskState] || '状态待确认'
       // 顺利出图时不再挂一行「完成」文案：图本身就是结果，状态行只在需要说明时出现。
       const quietStatus = taskState === 'done' && !activeReplacement && !(item && item.status === 'failed')
@@ -559,7 +571,9 @@ let openImageOverlay = null
         }) : placeholder,
         imgError ? h('div', { style: noteStyle }, imgRetry >= 20 ? '图取不到（' + imgError + '）　' : '正在取回…（第 ' + imgRetry + ' 次）', imgRetry >= 20 ? h('button', { type: 'button', onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) } }, '重新读取') : null) : null,
         quietStatus ? null : h('div', { style: { ...noteStyle, marginTop: '4px' }, role: 'status', 'aria-live': 'polite' },
-          taskState === 'uncertain' ? '状态待确认：任务号 ' + effectiveJobId + (currentPolledJob?.providerTaskId ? '（平台任务 ' + String(currentPolledJob.providerTaskId) + '）' : '') + '；请到生图平台检查，暂不自动重试。' :
+          taskState === 'uncertain' ? (queryUnavailable
+            ? '状态待确认：旧作业没有保存 ComfyUI 任务号，无法查询找回；若 ComfyUI 未收到任务，请从正文末重新生图。'
+            : '状态待确认：任务号 ' + effectiveJobId + (currentPolledJob?.comfyId ? '（ComfyUI ' + String(currentPolledJob.comfyId) + '）' : currentPolledJob?.providerTaskId ? '（平台任务 ' + String(currentPolledJob.providerTaskId) + '）' : '') + '；请到生图平台检查，暂不自动重试。') :
           taskState === 'cancelled' && cancellationMayContinue ? '已停止本地等待，但平台请求可能已发出并继续生成；请到生图平台检查用量。' + (replacement?.error ? ' ' + String(replacement.error).slice(0, 140) : '') :
           taskState === 'cancelled' ? '已取消' :
           (activeReplacement ? '替换任务' + statusLabel + (replacement.error || currentPolledJob?.error ? '：' + String(replacement.error || currentPolledJob.error).slice(0, 100) : '') :
@@ -568,7 +582,7 @@ let openImageOverlay = null
           ? h('button', { type: 'button', onClick: () => mediaAction('cancel'), disabled: actionBusy }, '取消这张图') : null,
         validMediaContext(mediaContext) && !actionBusy && taskState === 'failed' && !jobMayHaveReachedProvider
           ? h('button', { type: 'button', onClick: () => mediaAction('retry'), disabled: actionBusy }, '重试这张图') : null,
-        validMediaContext(mediaContext) && (taskState === 'uncertain' || (taskState === 'cancelled' && cancellationMayContinue))
+        validMediaContext(mediaContext) && !queryUnavailable && (taskState === 'uncertain' || (taskState === 'cancelled' && cancellationMayContinue))
           ? h('button', { type: 'button', onClick: () => mediaAction('recover'), disabled: actionBusy }, actionBusy ? '查询中…' : '重新查询状态') : null)
     }
 

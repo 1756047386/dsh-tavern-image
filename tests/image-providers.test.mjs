@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { IMAGE_PROVIDERS, USER_AGENT, generateImage, testImageChannel } from '../lib/image-providers.js'
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0])
@@ -212,6 +213,28 @@ test('testImageChannel safely probes NovelAI subscription endpoint with User-Age
   assert.equal(probe.calls[0].url, 'https://image.novelai.net/user/subscription')
   assert.equal(probe.calls[0].headers.authorization, 'Bearer top-secret')
   assert.equal(probe.calls[0].headers['user-agent'], USER_AGENT)
+})
+
+test('User-Agent stays in sync with the package version', () => {
+  const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+  assert.equal(USER_AGENT, `dsh-tavern-image/${version}`)
+})
+
+test('testImageChannel skips invalid entries in provider model lists', async () => {
+  const openai = mockFetch(() => json({ data: [{ id: 'first' }, null, 42, { name: 'second' }] }))
+  const dataResult = await testImageChannel(channel('openai'), { fetchImpl: openai.fetchImpl })
+  assert.equal(dataResult.status, 'reachable')
+  assert.deepEqual(dataResult.models, ['first', 'second'])
+
+  const modelList = mockFetch(() => json({ data: {}, models: [null, 'ignored', { name: 'fallback' }] }))
+  const modelsResult = await testImageChannel(channel('openai'), { fetchImpl: modelList.fetchImpl })
+  assert.equal(modelsResult.status, 'reachable')
+  assert.deepEqual(modelsResult.models, ['fallback'])
+
+  const sdwebui = mockFetch(() => json([null, 'ignored', { model_name: 'checkpoint' }, {}]))
+  const sdResult = await testImageChannel(channel('sdwebui'), { fetchImpl: sdwebui.fetchImpl })
+  assert.equal(sdResult.status, 'reachable')
+  assert.deepEqual(sdResult.models, ['checkpoint'])
 })
 
 test('testImageChannel honors custom testPath for NovelAI reverse proxy', async () => {

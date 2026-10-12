@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage, PromptEditor, validMediaContext, createHistoryRequestEpoch, indexedHistoryChanges }')
+  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, InlineImage, OfficialImage, PromptEditor, validMediaContext, createHistoryRequestEpoch, indexedHistoryChanges }')
 const packageName = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).name
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -56,9 +56,11 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
       const parsedUrl = new URL(url)
       const path = parsedUrl.pathname.split('/').at(-1)
       const body = init.body ? JSON.parse(init.body) : null
-      requests.push({ path, pathname: parsedUrl.pathname, method: init.method || 'GET', query: Object.fromEntries(parsedUrl.searchParams), body })
+      const method = init.method || 'GET'
+      const query = Object.fromEntries(parsedUrl.searchParams)
+      requests.push({ path, pathname: parsedUrl.pathname, method, query, body })
       let result
-      if (extra[path]) result = await extra[path]({ body, state, setState: next => { state = next } })
+      if (extra[path]) result = await extra[path]({ body, query, method, state, setState: next => { state = next } })
       else if (path === 'state') result = copy(state)
       else if (path === 'definitions') { state = { ...state, definitions: copy(body.definitions), outfits: copy(body.definitions.outfits) }; result = { ok: true, state: copy(state) } }
       else if (path === 'cards') result = { ok: true, cards: [{ path: 'cards/story.json', name: '故事卡' }] }
@@ -147,6 +149,31 @@ test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 cap
   assert.equal(ui.nodes(image).filter(node => node.type === 'img')[0].props.alt, '[客籍关前验魂灰]')
   assert.equal(ui.text(image), '')
   assert.equal(ui.nodes(image).some(node => node.type === 'button'), false)
+})
+
+test('正文内图片遇到终态失败后，手动重试会重新提交同一个 key', async () => {
+  let submissions = 0
+  const ui = harness({
+    jobs: ({ query, body }) => {
+      if (body) {
+        submissions++
+        return { id: 'new-inline-job', status: 'pending' }
+      }
+      if (query.key) return { ok: true, job: { id: 'old-inline-job', status: 'failed', error: 'ComfyUI 没开' } }
+      return { ok: true, job: { id: 'new-inline-job', status: 'done' } }
+    },
+  })
+  let tree = ui.renderComponent(ui.api.__test.InlineImage, { prompt: 'portrait', imageKey: 'same-inline-key', auto: true })
+  await flush(); await flush()
+  tree = ui.renderComponent(ui.api.__test.InlineImage, { prompt: 'portrait', imageKey: 'same-inline-key', auto: true })
+  assert.equal(submissions, 0, 'a previously failed historical image must not resubmit automatically')
+  const retry = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重试')
+  assert.ok(retry)
+  retry.props.onClick()
+  tree = ui.renderComponent(ui.api.__test.InlineImage, { prompt: 'portrait', imageKey: 'same-inline-key', auto: true })
+  await flush(); await flush()
+  assert.equal(submissions, 1)
+  assert.ok(ui.requests.some(request => request.path === 'jobs' && request.method === 'POST' && request.body.key === 'same-inline-key'))
 })
 
 test('失败占位支持点击、右键和长按打开提示词编辑器', async () => {
@@ -365,6 +392,43 @@ test('provider 结果不确定时即使 job 标为 failed 也不显示付费重�
   const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
   assert.match(ui.text(tree), /平台任务 platform-job-7/)
   assert.equal(ui.nodes(tree).some(node => node.type === 'button' && /重试/.test(ui.text(node))), false)
+})
+
+test('旧 ComfyUI 不确定作业没有平台任务号时显示正文重生图指引且不渲染破图', async () => {
+  const ui = harness({
+    'job-detail': ({ query }) => ({ ok: true, job: { id: query.id, state: 'uncertain', backend: 'comfyui', requestMayHaveSucceeded: true, comfyId: '' } }),
+  })
+  const props = {
+    gameId: 'game-legacy-comfy', turn: 4,
+    item: { id: 'media-legacy-comfy', textVersion: 'text-v4', status: 'pending', data: { jobId: 'job-legacy-comfy' } },
+  }
+  ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await flush(); await flush()
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  assert.equal(ui.nodes(tree).some(node => node.type === 'img'), false)
+  assert.match(ui.text(tree), /没有保存 ComfyUI 任务号/)
+  assert.match(ui.text(tree), /正文末重新生图/)
+  assert.equal(ui.nodes(tree).some(node => node.type === 'button' && ui.text(node) === '重新查询状态'), false)
+})
+
+test('确认失败的 ComfyUI 媒体仍提供单图重试操作', async () => {
+  const ui = harness({
+    'job-detail': ({ query }) => ({ ok: true, job: { id: query.id, state: 'failed', backend: 'comfyui', requestMayHaveSucceeded: false } }),
+    'media-action': ({ body }) => ({ ok: true, jobId: 'fresh-comfy-job', mediaId: body.mediaId, state: 'pending' }),
+  })
+  const props = {
+    gameId: 'game-retry-comfy', turn: 5,
+    item: { id: 'media-retry-comfy', textVersion: 'text-v5', status: 'failed', data: { jobId: 'failed-comfy-job' } },
+  }
+  ui.renderComponent(ui.api.__test.OfficialImage, props)
+  await flush(); await flush()
+  const tree = ui.renderComponent(ui.api.__test.OfficialImage, props)
+  const retry = ui.nodes(tree).find(node => node.type === 'button' && ui.text(node) === '重试这张图')
+  assert.ok(retry)
+  await retry.props.onClick()
+  const action = ui.requests.find(request => request.path === 'media-action')
+  assert.equal(action.body.operation, 'retry')
+  assert.equal(action.body.jobId, 'failed-comfy-job')
 })
 
 test('不确定图片可只读重新查询；找回结果后恢复单图并用新 job 取图', async () => {

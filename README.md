@@ -4,7 +4,14 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
-2.5.2 根据使用反馈修正了取消后的操作入口、工作流提示词绑定和安装路径识别，并调整了画风、世界书页面的文字与背景配色。安装方法见下方「安装与第一次出图」。
+2.5.3 修正了 ComfyUI 离线后无法原位重试的问题，补齐 NovelAI 连接探测，并改善失败图片的显示。安装方法见下方「安装与第一次出图」。
+
+## 2.5.3 更新
+
+- **ComfyUI 恢复后可重试原图。** 服务未启动、明确拒绝连接时，任务显示失败，可从原插图位置重试或编辑提示词重画；正文标记的重试也会创建新任务，不再反复读同一条失败记录。
+- **提交响应丢失时可查询原任务。** 提交前保存 ComfyUI 任务号，支持自定义任务号的 ComfyUI 可以通过「重新查询状态」找回队列或历史结果，不重复提交生图请求。旧记录若没有任务号，会说明无法查询；核对平台后可从正文末的「生图」重新生成。
+- **失败图片显示可操作的占位。** 没有已完成图片时，失败、取消或状态待确认的任务不再反复请求不存在的图片；点击占位可以打开提示词编辑器。重画期间仍保留已完成的原图。
+- **NovelAI 连接测试发起真实只读探测。** 合并社区 PR #6，通过订阅接口检查地址和鉴权，支持自定义探测路径，不提交生图任务。各渠道请求附带插件版本标识，异常模型列表条目不会让连接测试误报失败。
 
 ## 2.5.2 更新
 
@@ -48,7 +55,7 @@
 
 安装器默认使用 `%USERPROFILE%\.dsh` 下的 `tavern` Profile；可通过 `-Profile` 指定另一个**已经存在**的 Profile。安装器只安装插件源码，不运行仓库脚本；它调用 DSH 官方 CLI 的 `plugin add`，附带 `--ignore-scripts`，由 DSH 将依赖、`node_modules` 链接和 bundle 一起登记。若 `tools/dsh-tavern-image` 或 Profile 中已有同名依赖，安装器会停止，不覆盖已有内容；更新已安装插件请用插件自己的更新页。
 
-**推荐：下载 [2.5.2 发布页](https://github.com/weixinlll/dsh-tavern-image/releases/tag/v2.5.2)里的 `dsh-tavern-image-2.5.2-install.zip`。** 解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。
+已发布的离线安装包可从 [GitHub 发布页](https://github.com/weixinlll/dsh-tavern-image/releases)下载。解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。请核对发布版本；需要最新的 2.5.3 修复时，可用下方的源码 ZIP 安装方式。
 
 也可以在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master) 后，可以在 PowerShell 中指定文件：
 
