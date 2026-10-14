@@ -1144,7 +1144,7 @@ test('刷新后正文插图仍按保存的全局宽度显示：启动读一次 /
   })
   const officialImg = officialUi.nodes(official).find(node => node.type === 'img')
   assert.equal(officialImg.props.style.width, '900px')
-  assert.equal(officialImg.props.style.maxWidth, '96%', '宽度不能撑出比窗口更窄的聊天栏')
+  assert.equal(officialImg.props.style.maxWidth, '96vw', '量不到聊天区宽度时退回视口 96vw；量到后会用聊天区的 96%')
   assert.equal(officialImg.props.style.height, 'auto', '高度仍按原比例，只改显示宽度')
   assert.equal(officialUi.requests.filter(request => request.path === 'state').length, reads, '正文渲染热路径里不允许有 /state 请求')
 
@@ -1158,7 +1158,7 @@ test('刷新后正文插图仍按保存的全局宽度显示：启动读一次 /
   const inlineImg = inlineUi.nodes(inline).find(node => node.type === 'img')
   assert.ok(inlineImg, '恢复出来的正文插图应该渲染成图片')
   assert.equal(inlineImg.props.style.width, '900px')
-  assert.equal(inlineImg.props.style.maxWidth, '96%')
+  assert.equal(inlineImg.props.style.maxWidth, '96vw')
 })
 
 test('检查结果标记不支持时显示原因且不误报已是最新', async () => {

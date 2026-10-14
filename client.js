@@ -255,7 +255,9 @@ let openImageOverlay = null
     // 正文兜底渲染：模块级常量，保证引用稳定（见 renderAssistantText 里的说明）
     const FALLBACK_RENDER_TEXT = (value, key) => h('span', { key }, String(value ?? ''))
 
-    const wrapStyle = { margin: '14px 0', textAlign: 'center' }
+    // 注意：Tavern 的 .dsh-tavern-illustration 是 flex 列容器且 align-items:flex-start，
+    // 子元素默认宽度由内容决定（图片多宽就多宽）。显式撑满，宽度设置与容器测量才有参照。
+    const wrapStyle = { margin: '14px 0', textAlign: 'center', width: '100%', boxSizing: 'border-box' }
     const imgStyle = { maxWidth: '100%', borderRadius: '10px', cursor: 'zoom-in', background: '#111' }
     const noteStyle = { display: 'inline-block', padding: '10px 16px', borderRadius: '10px', fontSize: '13px',
       color: '#9aa3b2', border: '1px dashed #465365', background: 'rgba(255,255,255,.02)' }
@@ -268,8 +270,9 @@ let openImageOverlay = null
     // 正文渲染只读这个变量 —— 每张图都不再单独发请求（渲染热路径上不允许有网络请求）。
     const IMAGE_WIDTH_LIMIT = { min: 160, max: 1200, fallback: 660 }
     let bodyImageWidth = 0   // 0 = 没设置过，沿用正文原来的显示样式
-    // 正文容器实测宽度：由正文里的插图渲染时测出并写回。设置页的预览用它画「正文栏」参考线，
-    // 双击控制条也用它算出「实际会显示多少 px」。0 = 还没量到。
+    // 聊天区（正文栏）实测宽度：图片显示上限 = 它的 96%，超过就被压住。
+    // 测量要点：Tavern 的插图容器是 flex + align-items:flex-start，**子项**宽度由内容（图片）决定，
+    // 拖大图片它跟着变大 —— 拿它当参照会得到 172/124 这种飘忽数字。必须向上找**块级**祖先。
     let bodyContainerWidth = 0
     const imageWidthListeners = new Set()
 
@@ -279,6 +282,24 @@ let openImageOverlay = null
       const width = Number(value)
       if (!Number.isFinite(width) || width <= 0) return 0
       return Math.min(IMAGE_WIDTH_LIMIT.max, Math.max(IMAGE_WIDTH_LIMIT.min, Math.round(width)))
+    }
+
+    /**
+     * 从「祖先链」里挑出聊天区宽度。chain 是从近到远的测量结果，每项 { width, block }。
+     * 规则：取最宽的**块级**祖先，但排除掉视口本身（body 宽度≈视口，取它会让上限变成 96vw 而溢出聊天栏）；
+     * 被图片撑开的窄祖先（flex 子项）也会因为「更宽的那个更靠外」而被自然跳过。纯函数，方便单测与推演。
+     */
+    function pickContainerWidth(chain, viewport, capRatio = 0.98) {
+      const cap = Math.round((Number(viewport) || 0) * capRatio)
+      let best = 0
+      for (const item of Array.isArray(chain) ? chain : []) {
+        if (!item || !item.block) continue
+        const width = Math.round(Number(item.width) || 0)
+        if (!width) continue
+        if (cap && width > cap) continue
+        if (width > best) best = width
+      }
+      return best || Math.round(Number(viewport) || 0)
     }
 
     /** 配置变化时通知已挂载的正文图片，不用等宿主再次渲染消息。 */
@@ -307,7 +328,10 @@ let openImageOverlay = null
     function imageWidthStyle(defaults, configuredWidth) {
       if (!configuredWidth) return defaults
       // 展开 defaults：以后给默认样式加键（objectFit / aspectRatio 之类）不会在这里被悄悄丢掉。
-      return { ...defaults, width: configuredWidth + 'px', maxWidth: '96%' }
+      // 上限：量到聊天区就用它的 96%（保证不撑出聊天栏），还没量到就用视口兜底。
+      // 不能用 96%：图片的父容器宽度恰好由图片自己撑开，百分比会反向依赖图片，形成循环把图锁死。
+      const limit = bodyContainerWidth ? Math.round(bodyContainerWidth * 0.96) + 'px' : '96vw'
+      return { ...defaults, width: configuredWidth + 'px', maxWidth: limit }
     }
 
     /** 单张图：占位 → 轮询 → <img>。 */
@@ -379,7 +403,7 @@ let openImageOverlay = null
       if (state === 'done' && jobId) {
         const src = `${BASE}/jobs?id=${encodeURIComponent(jobId)}&image=1`
         return h('div', { style: wrapStyle },
-          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96%)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
+          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96vw)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -452,7 +476,7 @@ let openImageOverlay = null
         }
         return h('div', { style: wrapStyle },
           h('img', { key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
-            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96%)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
+            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96vw)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -486,14 +510,21 @@ let openImageOverlay = null
       // 手机适配：触屏上 dblclick 不可靠，自己认「两次快速轻点」；并短暂屏蔽随后合成的 click。
       const lastTapAt = React.useRef(0)
       const suppressTapUntil = React.useRef(0)
-      // 量一下正文容器有多宽：设定值超过它就会被压到 96%，这也正是「对比」要看的东西。
+      // 量聊天区宽度：从自己往上找第一个「块级」祖先 —— 它的宽度由父级决定，不会随图片大小变。
       const wrapRef = React.useRef(null)
       React.useEffect(() => {
-        const node = wrapRef.current
-        if (!node) return undefined
         const measure = () => {
-          const width = Math.round(node.getBoundingClientRect().width || 0)
-          if (width) bodyContainerWidth = width
+          const chain = []
+          let node = wrapRef.current
+          for (let hop = 0; hop < 10 && node; hop += 1) {
+            let display = ''
+            try { display = window.getComputedStyle ? (window.getComputedStyle(node).display || '') : '' } catch { display = '' }
+            let width = 0
+            try { width = node.getBoundingClientRect ? node.getBoundingClientRect().width : 0 } catch { width = 0 }
+            chain.push({ width, block: /^(block|flex|grid|flow-root|list-item|table)$/.test(display) })
+            node = node.parentElement
+          }
+          bodyContainerWidth = pickContainerWidth(chain, window.innerWidth)
         }
         measure()
         window.addEventListener('resize', measure)
@@ -674,7 +705,7 @@ let openImageOverlay = null
           }),
           h('span', { style: { minWidth: '56px' } }, widthDraft + ' px'),
           bodyContainerWidth
-            ? h('span', { style: { opacity: .7 } }, '正文栏 ' + bodyContainerWidth + ' px → 实际显示 ' + Math.min(widthDraft, Math.round(bodyContainerWidth * 0.96)) + ' px')
+            ? h('span', { style: { opacity: .7 } }, '最多显示 ' + Math.min(widthDraft, Math.round(bodyContainerWidth * 0.96)) + ' px')
             : null,
           h('button', { type: 'button', style: barBtn, onClick: () => { void saveWidthBar(widthDraft) } }, '保存'),
           h('button', { type: 'button', style: barBtn, onClick: closeWidthBar }, '取消'),
@@ -2814,7 +2845,7 @@ function versionsOf(jobId) {
         const compareRows = [
           { key: 'mine', label: '你设的宽度', width: previewWidth, color: '#8fb4ff', image: sampleSrc },
           { key: 'default', label: '默认', width: IMAGE_WIDTH_LIMIT.fallback, color: '#6b7480', dashed: true },
-          bodyContainerWidth ? { key: 'body', label: '正文栏（实测）', width: bodyContainerWidth, color: '#e8c07a' } : null,
+          bodyContainerWidth ? { key: 'limit', label: '显示上限', width: Math.round(bodyContainerWidth * 0.96), color: '#e8c07a' } : null,
         ].filter(Boolean)
         const rulerBg = 'repeating-linear-gradient(to right, rgba(120,140,170,.18) 0 1px, transparent 1px 100px)'
         const compareBar = row => h('div', { key: row.key, style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' } },
@@ -2843,7 +2874,8 @@ function versionsOf(jobId) {
           h('div', { style: { marginTop: '10px' } },
             compareRows.map(compareBar),
             h('div', { style: { fontSize: '11px', color: '#8b93a1', marginTop: '7px', lineHeight: 1.6 } },
-              '结论：正文里实际显示 ' + (bodyContainerWidth ? (Math.min(previewWidth, Math.round(bodyContainerWidth * 0.96)) + ' px（正文栏 ' + bodyContainerWidth + ' px 的限制内）') : (previewWidth + ' px（还没量到正文栏宽度，回正文看一次插图就能量到）')) + '。'),
+              '结论：正文里实际显示 ' + (bodyContainerWidth ? Math.min(previewWidth, Math.round(bodyContainerWidth * 0.96)) + ' px' : previewWidth + ' px') +
+              (bodyContainerWidth ? '（聊天区 ' + bodyContainerWidth + ' px，最多显示 ' + Math.round(bodyContainerWidth * 0.96) + ' px）' : '') + '。'),
           ),
           h('div', { style: Object.assign({}, S.row, { marginTop: '10px' }) },
             h('input', {
