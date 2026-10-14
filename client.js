@@ -262,9 +262,58 @@ let openImageOverlay = null
     const buttonStyle = { padding: '8px 16px', borderRadius: '9px', border: '1px solid #566275',
       background: 'rgba(255,255,255,.04)', color: '#e8ebf1', cursor: 'pointer', fontSize: '13px' }
 
+    // ---- 正文插图的统一显示宽度（全局设置）---------------------------------
+    // 只改正文里的显示宽度：不重采样原图、不改生成分辨率，点开后的全屏看图也不受影响。
+    // 启动时从 /state 读一次（刷新/重启后依然生效），设置里保存成功后立刻更新。
+    // 正文渲染只读这个变量 —— 每张图都不再单独发请求（渲染热路径上不允许有网络请求）。
+    const IMAGE_WIDTH_LIMIT = { min: 160, max: 1200, fallback: 660 }
+    let bodyImageWidth = 0   // 0 = 没设置过，沿用正文原来的显示样式
+    // 正文容器实测宽度：由正文里的插图渲染时测出并写回。设置页的预览用它画「正文栏」参考线，
+    // 双击控制条也用它算出「实际会显示多少 px」。0 = 还没量到。
+    let bodyContainerWidth = 0
+    const imageWidthListeners = new Set()
+
+    /** 归一化显示宽度：空值 / 非数字 / <= 0 一律当 0（默认）；其余夹进 160–1200 的整数。 */
+    function normalizeImageWidth(value) {
+      if (value === null || value === undefined || value === '') return 0
+      const width = Number(value)
+      if (!Number.isFinite(width) || width <= 0) return 0
+      return Math.min(IMAGE_WIDTH_LIMIT.max, Math.max(IMAGE_WIDTH_LIMIT.min, Math.round(width)))
+    }
+
+    /** 配置变化时通知已挂载的正文图片，不用等宿主再次渲染消息。 */
+    function applyImageWidth(value) {
+      const next = normalizeImageWidth(value)
+      if (next === bodyImageWidth) return
+      bodyImageWidth = next
+      for (const notify of imageWidthListeners) notify(next)
+    }
+
+    function useImageWidth() {
+      const [width, setWidth] = useState(bodyImageWidth)
+      useEffect(() => {
+        imageWidthListeners.add(setWidth)
+        setWidth(bodyImageWidth)
+        return () => imageWidthListeners.delete(setWidth)
+      }, [])
+      return width
+    }
+
+    /**
+     * 正文插图统一的宽度样式。没设置过（0）时原样返回调用方原来的默认样式，
+     * 保证"不设置"和现在的显示效果一模一样；设置后限制到正文容器的 96%，
+     * 高度仍由浏览器按原比例算，窄聊天栏也不会溢出。
+     */
+    function imageWidthStyle(defaults, configuredWidth) {
+      if (!configuredWidth) return defaults
+      // 展开 defaults：以后给默认样式加键（objectFit / aspectRatio 之类）不会在这里被悄悄丢掉。
+      return { ...defaults, width: configuredWidth + 'px', maxWidth: '96%' }
+    }
+
     /** 单张图：占位 → 轮询 → <img>。 */
     function InlineImage(props) {
       const { prompt, imageKey, auto } = props
+      const displayWidth = useImageWidth()
       const [state, setState] = useState(auto ? 'pending' : 'idle')
       const [error, setError] = useState('')
       const [jobId, setJobId] = useState('')
@@ -330,7 +379,7 @@ let openImageOverlay = null
       if (state === 'done' && jobId) {
         const src = `${BASE}/jobs?id=${encodeURIComponent(jobId)}&image=1`
         return h('div', { style: wrapStyle },
-          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(660px, 96%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
+          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96%)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -348,6 +397,7 @@ let openImageOverlay = null
     /** 计划里的一张图：jobId 由 host 建好了，这里只负责等它画完。 */
     function PlanImage(props) {
       const { plan, index } = props
+      const displayWidth = useImageWidth()
       // 一律先当 pending：宿主给的 status 可能已经过时（图还没真画好），靠轮询拿真实状态
       const [state, setState] = useState('pending')
       const [error, setError] = useState('')
@@ -402,7 +452,7 @@ let openImageOverlay = null
         }
         return h('div', { style: wrapStyle },
           h('img', { key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
-            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(660px, 96%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
+            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96%)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -418,6 +468,7 @@ let openImageOverlay = null
      *  官方内置的 image 类型做不到这些（尺寸和交互由 Tavern 固定，插件插不进手）。 */
     function OfficialImage(props) {
       const { item } = props
+      const displayWidth = useImageWidth()
       const jobId = String(item && item.data && item.data.jobId || '')
       const replacement = item && item.data && item.data.replacement && typeof item.data.replacement === 'object' ? item.data.replacement : null
       const activeJobId = String(replacement && replacement.jobId || jobId)
@@ -426,6 +477,64 @@ let openImageOverlay = null
         textVersion: String(item && item.textVersion || ''), mediaId: String(item && item.id || ''), jobId,
       }
       const title = String(item && item.caption || '')
+      // 双击插图 → 底部弹出「显示大小」控制条：拖滑块时这张图立刻变，看准了再保存。
+      // 草稿只作用于本地显示（applyImageWidth 不发请求），点保存才写 /config。
+      const [widthBarOpen, setWidthBarOpen] = React.useState(false)
+      const [widthDraft, setWidthDraft] = React.useState(0)
+      const [widthBarNote, setWidthBarNote] = React.useState('')
+      const widthBarStart = React.useRef(0)
+      // 手机适配：触屏上 dblclick 不可靠，自己认「两次快速轻点」；并短暂屏蔽随后合成的 click。
+      const lastTapAt = React.useRef(0)
+      const suppressTapUntil = React.useRef(0)
+      // 量一下正文容器有多宽：设定值超过它就会被压到 96%，这也正是「对比」要看的东西。
+      const wrapRef = React.useRef(null)
+      React.useEffect(() => {
+        const node = wrapRef.current
+        if (!node) return undefined
+        const measure = () => {
+          const width = Math.round(node.getBoundingClientRect().width || 0)
+          if (width) bodyContainerWidth = width
+        }
+        measure()
+        window.addEventListener('resize', measure)
+        return () => window.removeEventListener('resize', measure)
+      }, [])
+      const openWidthBar = () => {
+        widthBarStart.current = normalizeImageWidth(displayWidth || 0)
+        setWidthDraft(displayWidth || IMAGE_WIDTH_LIMIT.fallback)
+        setWidthBarNote('')
+        setWidthBarOpen(true)
+      }
+      const closeWidthBar = () => {
+        applyImageWidth(normalizeImageWidth(widthBarStart.current))
+        setWidthBarOpen(false)
+        setWidthBarNote('')
+      }
+      const saveWidthBar = async (value) => {
+        setWidthBarNote('保存中…')
+        try {
+          await jsonFetch(BASE + '/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { imageDisplayWidth: value } }),
+          })
+          applyImageWidth(value)
+          setWidthBarNote(value ? ('已保存：正文插图统一按 ' + value + ' px') : '已恢复默认大小')
+          setTimeout(() => setWidthBarOpen(false), 800)
+        } catch (error) {
+          setWidthBarNote('保存失败：' + String((error && error.message) || error))
+        }
+      }
+      React.useEffect(() => {
+        if (!widthBarOpen) return undefined
+        const onKey = (event) => {
+          if (event.key !== 'Escape') return
+          applyImageWidth(normalizeImageWidth(widthBarStart.current))
+          setWidthBarOpen(false)
+          setWidthBarNote('')
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [widthBarOpen])
       const [imgError, setImgError] = useState('')
       const [imgNonce, setImgNonce] = useState(0)
       const [imgRetry, setImgRetry] = useState(0)
@@ -549,15 +658,39 @@ let openImageOverlay = null
         onTouchEnd: cancelPress, onTouchMove: cancelPress,
       }, placeholderText)
       // TavernPluginMediaItem 会统一追加 figcaption；这里保留 alt 和预览标题即可。
-      return h('div', { style: wrapStyle },
+      // 手机上手指出得准才行：按钮给足触控高度（38px 起），滑块在小屏上占更多宽度。
+      const barBtn = { padding: '8px 14px', minHeight: '38px', fontSize: '12px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'transparent', color: '#dbe3ee', cursor: 'pointer' }
+      return h('div', { style: wrapStyle, ref: wrapRef },
+        widthBarOpen ? h('div', {
+          style: { position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '12px', zIndex: 2147483002, display: 'flex', gap: '8px', alignItems: 'center', padding: '10px 12px', paddingBottom: 'calc(10px + env(safe-area-inset-bottom, 0px))', borderRadius: '12px', background: 'rgba(23,26,33,.97)', border: '1px solid rgba(120,140,170,.4)', boxShadow: '0 12px 32px rgba(0,0,0,.5)', color: '#dbe3ee', fontSize: '12px', maxWidth: '96vw', flexWrap: 'wrap', boxSizing: 'border-box' },
+        },
+          h('span', { style: { opacity: .75 } }, '显示大小'),
+          h('input', {
+            type: 'range', 'aria-label': '正文图片显示大小',
+            min: String(IMAGE_WIDTH_LIMIT.min), max: String(IMAGE_WIDTH_LIMIT.max), step: '10',
+            value: String(widthDraft),
+            style: { width: 'min(220px, 52vw)', accentColor: '#8fb4ff', cursor: 'pointer' },
+            onChange: event => { const next = Number(event.target.value); setWidthDraft(next); setWidthBarNote(''); applyImageWidth(next) },
+          }),
+          h('span', { style: { minWidth: '56px' } }, widthDraft + ' px'),
+          bodyContainerWidth
+            ? h('span', { style: { opacity: .7 } }, '正文栏 ' + bodyContainerWidth + ' px → 实际显示 ' + Math.min(widthDraft, Math.round(bodyContainerWidth * 0.96)) + ' px')
+            : null,
+          h('button', { type: 'button', style: barBtn, onClick: () => { void saveWidthBar(widthDraft) } }, '保存'),
+          h('button', { type: 'button', style: barBtn, onClick: closeWidthBar }, '取消'),
+          h('button', { type: 'button', style: barBtn, onClick: () => { void saveWidthBar(0) } }, '恢复默认'),
+          widthBarNote ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: /失败/.test(widthBarNote) ? '#f2686b' : '#8bd48b' } }, widthBarNote) : null,
+          h('span', { style: { opacity: .5 } }, 'Esc 取消'),
+        ) : null,
         showImage ? h('img', {
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
           onError: () => setImgError('加载失败'),
-          title: '点一下看大图 · 右键或长按改提示词 / 重画',
+          title: '点一下看大图 · 右键或长按改提示词 / 重画 · 双击调显示大小',
           // 覆盖 tavern.css 的 .dsh-tavern-illustration img 限制（320x240）：
           // 行内 style 优先级高于 CSS 类，所以这里写死 width/maxWidth/maxHeight 三件套。
-          style: { display: 'block', width: 'auto', height: 'auto', maxWidth: 'min(660px, 96vw)', maxHeight: 'none', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px 0' },
-          onClick: () => viewImage(displayJobId, title),
+          style: { display: 'block', ...imageWidthStyle({ width: 'auto', maxWidth: 'min(660px, 96vw)' }, displayWidth), height: 'auto', maxHeight: 'none', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px 0', touchAction: 'manipulation' },
+          onClick: () => { if (Date.now() < suppressTapUntil.current) return; viewImage(displayJobId, title) },
+          onDoubleClick: () => { cancelPress(); openWidthBar() },
           onContextMenu: event => {
             cancelPress()
             event.preventDefault()
@@ -567,7 +700,21 @@ let openImageOverlay = null
           onMouseDown: event => { if (event.button === 0) beginPress(displayJobId, title, displayMediaContext) },
           onMouseUp: cancelPress, onMouseLeave: cancelPress,
           onTouchStart: () => beginPress(displayJobId, title, displayMediaContext),
-          onTouchEnd: cancelPress, onTouchMove: cancelPress,
+          // 手机上 dblclick 不可靠：认两次快速轻点（≤320ms）打开宽度控制条，
+          // 并短暂屏蔽随后合成的 click，免得同时又弹出全屏大图。
+          onTouchEnd: event => {
+            cancelPress()
+            const now = Date.now()
+            if (now - lastTapAt.current <= 320) {
+              lastTapAt.current = 0
+              suppressTapUntil.current = now + 600
+              if (event.cancelable) event.preventDefault()
+              openWidthBar()
+              return
+            }
+            lastTapAt.current = now
+          },
+          onTouchMove: cancelPress,
         }) : placeholder,
         imgError ? h('div', { style: noteStyle }, imgRetry >= 20 ? '图取不到（' + imgError + '）　' : '正在取回…（第 ' + imgRetry + ' 次）', imgRetry >= 20 ? h('button', { type: 'button', onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) } }, '重新读取') : null) : null,
         quietStatus ? null : h('div', { style: { ...noteStyle, marginTop: '4px' }, role: 'status', 'aria-live': 'polite' },
@@ -2049,6 +2196,22 @@ function versionsOf(jobId) {
       const pluginUpdateMounted = React.useRef(true)
       pluginUpdateTabRef.current = tab
       const [note, setNote] = React.useState('')
+      // 正文图片显示大小：输入过程只改草稿（绝不边输边发请求），点「保存」才发一次 /config。
+      // null = 跟随已保存的配置；保存成功后回到 null，输入框显示服务端确认过的值。
+      const [displayWidthDraft, setDisplayWidthDraft] = React.useState(null)
+      const [displayWidthNote, setDisplayWidthNote] = React.useState('')
+      // 宽度预览用的样例图：最近一张出好的插图。抓不到就退回示意图。
+      const [widthSampleJob, setWidthSampleJob] = React.useState(null)
+      React.useEffect(() => {
+        let alive = true
+        jsonFetch(BASE + '/history').then(r => {
+          if (!alive) return
+          const jobs = Array.isArray(r && r.jobs) ? r.jobs : []
+          const hit = jobs.find(j => j && j.hasImage && ['done', 'ready'].includes(String(j.state)))
+          if (hit) setWidthSampleJob({ id: String(hit.id), title: String(hit.tag || hit.label || '插图') })
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [])
       const [planText, setPlanText] = React.useState('')
       const [planRows, setPlanRows] = React.useState(null)
       // 哪一行正在展开"选择绑定卡片"（-1 = 都没展开）；内联展开，不用浮层
@@ -2325,6 +2488,21 @@ function versionsOf(jobId) {
         })
         configSaveQueue.current = operation.catch(() => {})
         return operation
+      }
+
+      /**
+       * 保存「正文图片显示大小」。草稿是输入框里的原始文本：留空 = 恢复默认（0），
+       * 超出范围按 160–1200 收窄后再提交，非法输入在前端就被挡住。
+       * 保存成功后立刻作用于本会话的正文插图（不用等刷新）；失败时保留草稿，方便重试。
+       */
+      async function saveDisplayWidth(override) {
+        const value = normalizeImageWidth(override === undefined ? displayWidthDraft : override)
+        setDisplayWidthNote('保存中…')
+        const saved = await save({ imageDisplayWidth: value })
+        if (!saved) { setDisplayWidthNote('保存失败，请重试'); return }
+        applyImageWidth(value)
+        setDisplayWidthDraft(null)
+        setDisplayWidthNote(value ? ('已保存：正文插图统一按 ' + value + ' px 显示') : '已恢复默认大小')
       }
 
       if (!data) return h('div', { style: Object.assign({}, S.surface, { padding: '18px', fontSize: '13px' }) }, note || '正在读取…')
@@ -2613,6 +2791,90 @@ function versionsOf(jobId) {
       }
 
 
+      /**
+       * 正文图片显示大小（全局）：设一个宽度，正文里所有插件插图 —— 已有的和新生成的 ——
+       * 都按它显示。只改显示宽度：不重采样原图、不改生成分辨率，点开后的全屏大图也不受影响。
+       */
+      function imageDisplayCard() {
+        const saved = normalizeImageWidth(config.imageDisplayWidth)
+        const draftText = displayWidthDraft === null ? (saved ? String(saved) : '') : displayWidthDraft
+        // 只收数字（空 = 默认）：数字输入框里手打的内容也走这里，非法值不给保存，
+        // 免得把 NaN 发到服务端。
+        const valid = /^\s*\d*\s*$/.test(draftText)
+        const draftValue = normalizeImageWidth(draftText)
+        const busy = displayWidthNote === '保存中…'
+        const previewWidth = draftValue || saved || IMAGE_WIDTH_LIMIT.fallback
+        // 有没保存的改动 = 正在预览：此时正文插图已经按草稿宽度显示了，只是还没写盘。
+        const dirty = displayWidthDraft !== null && draftValue !== saved
+        const sampleSrc = widthSampleJob ? BASE + '/jobs?id=' + encodeURIComponent(widthSampleJob.id) + '&image=1' : ''
+        /**
+         * 宽度对比：每条横条的长度 = 该数值的真实像素（1 : 1），共用同一把刻度尺，超宽横向滚动。
+         * 不看图内容，只看长短 —— 这样一眼能看出「你设的宽度」「默认」「正文栏」谁宽谁窄。
+         */
+        const compareRows = [
+          { key: 'mine', label: '你设的宽度', width: previewWidth, color: '#8fb4ff', image: sampleSrc },
+          { key: 'default', label: '默认', width: IMAGE_WIDTH_LIMIT.fallback, color: '#6b7480', dashed: true },
+          bodyContainerWidth ? { key: 'body', label: '正文栏（实测）', width: bodyContainerWidth, color: '#e8c07a' } : null,
+        ].filter(Boolean)
+        const rulerBg = 'repeating-linear-gradient(to right, rgba(120,140,170,.18) 0 1px, transparent 1px 100px)'
+        const compareBar = row => h('div', { key: row.key, style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' } },
+          h('div', { style: { flex: '0 0 auto', width: '74px', fontSize: '10px', color: row.color, lineHeight: 1.3 } }, row.label),
+          h('div', { style: { position: 'relative', flex: '1 1 auto', height: '42px', overflowX: 'auto', overflowY: 'hidden', borderRadius: '6px', background: '#12151b', border: '1px solid #262c36', backgroundImage: rulerBg } },
+            h('div', {
+              title: row.width + ' px',
+              style: Object.assign({
+                height: '100%', width: row.width + 'px', minWidth: '10px', borderRadius: '5px', overflow: 'hidden',
+                transition: 'width .12s ease-out', boxSizing: 'border-box',
+              }, row.image
+                ? { border: '1px solid ' + row.color }
+                : (row.dashed ? { border: '1px dashed ' + row.color, background: 'rgba(120,140,170,.12)' } : { border: '1px solid ' + row.color, background: 'rgba(232,192,122,.14)' })),
+            },
+              row.image ? h('img', { key: 'shot', src: row.image, alt: '插图', loading: 'lazy', decoding: 'async', style: { display: 'block', width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'top center' } }) : null,
+            ),
+          ),
+          h('div', { style: { flex: '0 0 auto', width: '58px', fontSize: '10px', color: row.color, textAlign: 'right' } }, row.width + ' px'),
+        )
+        return h('div', { style: S.card },
+          h('div', { style: { fontSize: '13px', fontWeight: 600, marginBottom: '6px' } }, '正文图片显示大小'),
+          h('div', { style: { fontSize: '12px', color: '#9aa3b2', lineHeight: 1.6 } },
+            '正文里所有插件插图（已存在的和新生成的）统一按这个宽度显示，高度按原比例，窄屏不会溢出。',
+            '只改显示大小：不重采样原图、不改生成分辨率，点开后的全屏大图也不受影响。',
+            '拖动滑块时，正文里的插图会立刻跟着变 —— 看准了再保存。'),
+          h('div', { style: { marginTop: '10px' } },
+            compareRows.map(compareBar),
+            h('div', { style: { fontSize: '11px', color: '#8b93a1', marginTop: '7px', lineHeight: 1.6 } },
+              '结论：正文里实际显示 ' + (bodyContainerWidth ? (Math.min(previewWidth, Math.round(bodyContainerWidth * 0.96)) + ' px（正文栏 ' + bodyContainerWidth + ' px 的限制内）') : (previewWidth + ' px（还没量到正文栏宽度，回正文看一次插图就能量到）')) + '。'),
+          ),
+          h('div', { style: Object.assign({}, S.row, { marginTop: '10px' }) },
+            h('input', {
+              'aria-label': '正文图片显示宽度', type: 'range',
+              min: String(IMAGE_WIDTH_LIMIT.min), max: String(IMAGE_WIDTH_LIMIT.max), step: '10',
+              value: String(draftValue || IMAGE_WIDTH_LIMIT.fallback), disabled: busy,
+              style: { width: 'min(240px, 52vw)', accentColor: '#8fb4ff', cursor: 'pointer' },
+              onChange: e => { setDisplayWidthNote(''); setDisplayWidthDraft(String(e.target.value)); applyImageWidth(e.target.value) },
+            }),
+            h('input', {
+              'aria-label': '正文图片显示宽度（像素）', type: 'number',
+              min: String(IMAGE_WIDTH_LIMIT.min), max: String(IMAGE_WIDTH_LIMIT.max),
+              value: draftText, placeholder: '默认', disabled: busy,
+              style: Object.assign({}, S.input, { width: '92px' }),
+              onChange: e => { setDisplayWidthNote(''); setDisplayWidthDraft(e.target.value); applyImageWidth(e.target.value) },
+            }),
+            h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, draftValue ? draftValue + ' px' : '默认'),
+            h('button', { style: buttonStyle, disabled: busy || !valid || draftValue === saved, onClick: () => { void saveDisplayWidth() } }, busy ? '保存中…' : '保存'),
+            dirty ? h('button', { style: buttonStyle, disabled: busy, onClick: () => { setDisplayWidthDraft(null); setDisplayWidthNote(''); applyImageWidth(saved) } }, '取消预览') : null,
+            h('button', { style: buttonStyle, disabled: busy || !saved, onClick: () => { void saveDisplayWidth('') } }, '恢复默认'),
+            !valid ? h('span', { role: 'alert', style: { fontSize: '12px', color: '#f2686b' } }, '宽度只能是数字') : null,
+            dirty
+              ? h('span', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', color: '#e8c07a' } }, '预览中（未保存）：正文已临时按 ' + (draftValue ? draftValue + ' px' : '默认') + ' 显示')
+              : (displayWidthNote ? h('span', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', color: /失败/.test(displayWidthNote) ? '#f2686b' : '#8bd48b' } }, displayWidthNote) : null),
+          ),
+          h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '6px' } },
+            '可填 ' + IMAGE_WIDTH_LIMIT.min + '–' + IMAGE_WIDTH_LIMIT.max + ' 像素；留空 = 默认。超出范围会自动收窄到区间内。',
+            '保存后刷新或重启依然有效。拖完可以直接切回正文看效果，不满意点「取消预览」。'),
+        )
+      }
+
       function planTab() {
         const entries = data.worldbook || []
         const chosen = Array.isArray(config.plannerEntries) ? config.plannerEntries : []
@@ -2660,6 +2922,7 @@ function versionsOf(jobId) {
               onlyVision: true, hint: '只列支持看图的模型；设计角色读参考图时用它',
             }),
           ),
+          imageDisplayCard(),
           h('div', { style: S.card },
             h('div', { style: { fontSize: '13px', marginBottom: '4px' } },
               (function () {
@@ -4674,6 +4937,8 @@ function versionsOf(jobId) {
             settings.autoImageGen = state.config.autoImageGen !== false
             settings.plannerEnabled = state.config.plannerEnabled !== false
             settings.smartImageSelection = state.config.smartImageSelection !== false
+            // 正文插图统一宽度：每次启动都从 /state 读回来，所以刷新 / 重启之后依然生效。
+            applyImageWidth(state.config.imageDisplayWidth)
           }
         }).catch(() => { /* 拿不到配置就安静退化成只在有标记时出图 */ })
 

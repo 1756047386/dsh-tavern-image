@@ -1075,6 +1075,92 @@ test('更新请求跨页成功后保留重启状态并保留人物页新草稿',
   assert.equal(ui.roleInput('a', '角色名').props.value, '跨页期间的草稿')
 })
 
+test('设置里保存正文图片显示宽度：输入过程不发请求，保存后立刻反馈，可恢复默认', async () => {
+  const settle = async (rounds = 8) => { for (let i = 0; i < rounds; i += 1) await flush() }
+  const ui = harness({
+    config: ({ body, state, setState }) => {
+      const next = { ...state, config: { ...state.config, ...body.config } }
+      setState(next)
+      return { ok: true, state: copy(next) }
+    },
+  })
+  ui.render(); await flush(); ui.render()
+
+  const widthInput = () => ui.input('正文图片显示宽度（像素）')
+  assert.equal(widthInput().props.value, '', '没设置过时输入框留空，表示默认')
+  assert.equal(ui.input('正文图片显示宽度').props.value, '660', '默认时滑块停在正文原本的显示宽度上')
+  assert.equal(ui.button('保存').props.disabled, true, '没有改动就不该能保存')
+
+  // 边输边发请求就是 bug：输入过程只改草稿。
+  for (const value of ['9', '90', '900']) { widthInput().props.onChange({ target: { value } }); ui.render() }
+  assert.equal(widthInput().props.value, '900')
+  assert.equal(ui.button('保存').props.disabled, false)
+  assert.equal(ui.requests.filter(request => request.path === 'config').length, 0)
+
+  // 非数字直接挡住，不把 NaN 发到服务端。
+  widthInput().props.onChange({ target: { value: '90px' } }); ui.render()
+  assert.equal(ui.button('保存').props.disabled, true)
+  assert.match(ui.text(ui.render()), /宽度只能是数字/)
+  widthInput().props.onChange({ target: { value: '900' } }); ui.render()
+
+  await ui.button('保存').props.onClick()
+  await settle(); ui.render()
+  const saves = ui.requests.filter(request => request.path === 'config')
+  assert.equal(saves.length, 1, '一次保存只发一个请求')
+  assert.deepEqual(saves[0].body, { config: { imageDisplayWidth: 900 } })
+  assert.match(ui.text(ui.render()), /已保存：正文插图统一按 900 px 显示/)
+
+  // 超出范围的输入在前端就收窄到 160–1200，绝不让正文被撑爆。
+  widthInput().props.onChange({ target: { value: '99999' } }); ui.render()
+  assert.match(ui.text(ui.render()), /1200 px/)
+  await ui.button('保存').props.onClick()
+  await settle(); ui.render()
+  assert.deepEqual(ui.requests.filter(request => request.path === 'config').at(-1).body, { config: { imageDisplayWidth: 1200 } })
+
+  // 恢复默认 = 回到 0，也就是现有显示效果。
+  await ui.button('恢复默认').props.onClick()
+  await settle(); ui.render()
+  const requests = ui.requests.filter(request => request.path === 'config')
+  assert.equal(requests.length, 3)
+  assert.deepEqual(requests.at(-1).body, { config: { imageDisplayWidth: 0 } })
+  assert.match(ui.text(ui.render()), /已恢复默认大小/)
+  assert.equal(ui.button('恢复默认').props.disabled, true, '已经是默认了就不必再恢复')
+})
+
+test('刷新后正文插图仍按保存的全局宽度显示：启动读一次 /state，渲染插图不再发请求', async () => {
+  // 模拟"上次保存过 900，这次刷新页面"：/state 里带着保存过的值。
+  const savedState = ({ state }) => ({ ...copy(state), config: { ...state.config, imageDisplayWidth: 900 } })
+
+  const officialUi = harness({ state: savedState })
+  officialUi.api.apply({})
+  await flush(); await flush()
+  const reads = officialUi.requests.filter(request => request.path === 'state').length
+  assert.equal(reads, 1, '启动时只读一次 /state')
+
+  // 正文里已经存在的图（历史媒体）也要用新的全局宽度。
+  const official = officialUi.renderComponent(officialUi.api.__test.OfficialImage, {
+    gameId: 'game-boot', turn: 3,
+    item: { id: 'media-boot', textVersion: 'text-v3', status: 'ready', url: '/old.png', data: { jobId: 'job-old' } },
+  })
+  const officialImg = officialUi.nodes(official).find(node => node.type === 'img')
+  assert.equal(officialImg.props.style.width, '900px')
+  assert.equal(officialImg.props.style.maxWidth, '96%', '宽度不能撑出比窗口更窄的聊天栏')
+  assert.equal(officialImg.props.style.height, 'auto', '高度仍按原比例，只改显示宽度')
+  assert.equal(officialUi.requests.filter(request => request.path === 'state').length, reads, '正文渲染热路径里不允许有 /state 请求')
+
+  // 正文标记生成的新图走另一条渲染路径，必须共用同一个宽度。
+  const inlineUi = harness({ state: savedState, jobs: () => ({ ok: true, job: { id: 'inline-boot-job', status: 'done' } }) })
+  inlineUi.api.apply({})
+  await flush(); await flush()
+  inlineUi.renderComponent(inlineUi.api.__test.InlineImage, { prompt: 'portrait', imageKey: 'boot-key', auto: true })
+  await flush(); await flush()
+  const inline = inlineUi.renderComponent(inlineUi.api.__test.InlineImage, { prompt: 'portrait', imageKey: 'boot-key', auto: true })
+  const inlineImg = inlineUi.nodes(inline).find(node => node.type === 'img')
+  assert.ok(inlineImg, '恢复出来的正文插图应该渲染成图片')
+  assert.equal(inlineImg.props.style.width, '900px')
+  assert.equal(inlineImg.props.style.maxWidth, '96%')
+})
+
 test('检查结果标记不支持时显示原因且不误报已是最新', async () => {
   const ui = harness({
     'plugin-update': () => ({ ok: true, currentVersion: '1.2.1', supported: true }),

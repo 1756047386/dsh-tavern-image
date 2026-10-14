@@ -120,6 +120,54 @@ test('partial config channel patches retain saved credentials and unrelated chan
   assert.equal(patch.imageBackend, 'openai')
 })
 
+test('正文图片显示宽度默认保持现有显示效果，保存后跨刷新与重启依然生效', async t => {
+  const fixture = await makePluginFixture(t)
+  const first = await fixture.boot()
+  const initial = await first.request('state', undefined, 'GET')
+  assert.equal(initial.body.config.imageDisplayWidth, 0, '没设置过就是 0（默认），等于不改变现在的正文显示')
+
+  const saved = await first.request('config', { config: { imageDisplayWidth: 900 } })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.state.config.imageDisplayWidth, 900, '/config 回包里立刻能看到新值')
+  first.dispose()
+
+  // 重新 boot = 用户刷新页面 / 重启 DSH：不重新设置也要按保存的宽度显示。
+  const restarted = await fixture.boot()
+  const refreshed = await restarted.request('state', undefined, 'GET')
+  assert.equal(refreshed.body.config.imageDisplayWidth, 900)
+  const persisted = JSON.parse(await readFile(join(fixture.root, 'config.json'), 'utf8'))
+  assert.equal(persisted.imageDisplayWidth, 900)
+})
+
+test('正文图片显示宽度只接受 160–1200，异常值退回默认而不会写进配置', async t => {
+  const fixture = await makePluginFixture(t)
+  const instance = await fixture.boot()
+  const save = async value => (await instance.request('config', { config: { imageDisplayWidth: value } })).body.state.config.imageDisplayWidth
+
+  // 过大的宽度不能把正文撑爆，过小的也要收到能看的下限。
+  assert.equal(await save(99999), 1200)
+  assert.equal(await save(4000), 1200)
+  assert.equal(await save(10), 160)
+  assert.equal(await save(159.6), 160)
+  assert.equal(await save(160), 160)
+  assert.equal(await save(1200), 1200)
+  // 前端滑块传的是字符串，得能正常收下。
+  assert.equal(await save('512.4'), 512)
+  // NaN、负数、乱填的字符串、空值：一律退回默认，绝不留下 NaN 或负宽度。
+  assert.equal(await save('NaN'), 0)
+  assert.equal(await save('abc'), 0)
+  assert.equal(await save(-40), 0)
+  assert.equal(await save(0), 0)
+  assert.equal(await save(null), 0)
+  assert.equal(await save(''), 0)
+
+  const persisted = JSON.parse(await readFile(join(fixture.root, 'config.json'), 'utf8'))
+  assert.equal(persisted.imageDisplayWidth, 0)
+  assert.equal(typeof persisted.imageDisplayWidth, 'number')
+  const state = await instance.request('state', undefined, 'GET')
+  assert.equal(state.body.config.imageDisplayWidth, 0)
+})
+
 test('planner and vision effort settings survive a fresh plugin boot and state refresh', async t => {
   const fixture = await makePluginFixture(t)
   const first = await fixture.boot()
