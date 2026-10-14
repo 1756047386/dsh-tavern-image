@@ -257,7 +257,10 @@ let openImageOverlay = null
 
     // 注意：Tavern 的 .dsh-tavern-illustration 是 flex 列容器且 align-items:flex-start，
     // 子元素默认宽度由内容决定（图片多宽就多宽）。显式撑满，宽度设置与容器测量才有参照。
-    const wrapStyle = { margin: '14px 0', textAlign: 'center', width: '100%', boxSizing: 'border-box' }
+    // 不能写 width:100%：Tavern 插图容器是 flex 列容器且 align-items:flex-start，子元素宽度由内容决定，
+    // 写 100% 会让「我的宽度依赖父容器、父容器又由我决定」形成循环，
+    // 浏览器只能按最小内容解析，图会塔缩成缩略图大小（实测设 2000 只显示 95px）。
+    const wrapStyle = { margin: '14px 0', textAlign: 'center' }
     const imgStyle = { maxWidth: '100%', borderRadius: '10px', cursor: 'zoom-in', background: '#111' }
     const noteStyle = { display: 'inline-block', padding: '10px 16px', borderRadius: '10px', fontSize: '13px',
       color: '#9aa3b2', border: '1px dashed #465365', background: 'rgba(255,255,255,.02)' }
@@ -313,10 +316,58 @@ let openImageOverlay = null
       return { ...defaults, width: configuredWidth + 'px', maxWidth: '96vw' }
     }
 
+    /**
+     * 手机端兜底：把宽度算成确定的像素值，用 !important 直接写到 <img> 上。
+     * 行内 style 在手机上会被挤小（实测设 2000 只显示 95 px）：宿主 tavern.css 给插图加了
+     * max-height: min(240px, 35svh)，部分 WebView 还不认 min()/svh，整条声明作废后
+     * 只剩 flex 收缩 + 高度上限在起作用。行内 !important 压得过任何样式表规则，
+     * 宽度也不再依赖 vw / min() 的支持情况，每次窗口变化（转屏、键盘）重新算一次。
+     * restore 是没设置宽度（0）时要还原的行内值，必须和 render 里的默认样式一致。
+     */
+    const FORCED_IMAGE_PROPS = ['width', 'min-width', 'max-width', 'height', 'max-height', 'flex-shrink']
+    function forceImageWidth(el, configuredWidth, restore) {
+      if (!el || !el.style) return
+      if (!configuredWidth) {
+        for (const prop of FORCED_IMAGE_PROPS) {
+          el.style.removeProperty(prop)
+          if (restore && restore[prop]) el.style.setProperty(prop, restore[prop])
+        }
+        return
+      }
+      const viewport = Math.max(window.innerWidth || 0, (document.documentElement && document.documentElement.clientWidth) || 0)
+      const px = Math.max(1, Math.round(Math.min(configuredWidth, viewport ? viewport * 0.96 : configuredWidth)))
+      el.style.setProperty('width', px + 'px', 'important')
+      el.style.setProperty('min-width', px + 'px', 'important')
+      el.style.setProperty('max-width', px + 'px', 'important')
+      el.style.setProperty('height', 'auto', 'important')
+      el.style.setProperty('max-height', 'none', 'important')
+      el.style.setProperty('flex-shrink', '0', 'important')
+    }
+
+    /** 返回一个 ref 回调，挂到 <img> 上即可：宽度设置变化、图片重新挂载、窗口尺寸变化时都重新落一次。 */
+    function useForcedImageWidth(configuredWidth, restore) {
+      const [el, setEl] = useState(null)
+      const restoreKey = JSON.stringify(restore || {})
+      useEffect(() => {
+        if (!el) return undefined
+        forceImageWidth(el, configuredWidth, restore)
+        if (!configuredWidth) return undefined
+        const onResize = () => forceImageWidth(el, configuredWidth, restore)
+        window.addEventListener('resize', onResize)
+        window.addEventListener('orientationchange', onResize)
+        return () => {
+          window.removeEventListener('resize', onResize)
+          window.removeEventListener('orientationchange', onResize)
+        }
+      }, [el, configuredWidth, restoreKey])
+      return setEl
+    }
+
     /** 单张图：占位 → 轮询 → <img>。 */
     function InlineImage(props) {
       const { prompt, imageKey, auto } = props
       const displayWidth = useImageWidth()
+      const forcedWidthRef = useForcedImageWidth(displayWidth, { width: '100%', 'max-width': 'min(660px, 96vw)' })
       const [state, setState] = useState(auto ? 'pending' : 'idle')
       const [error, setError] = useState('')
       const [jobId, setJobId] = useState('')
@@ -382,7 +433,7 @@ let openImageOverlay = null
       if (state === 'done' && jobId) {
         const src = `${BASE}/jobs?id=${encodeURIComponent(jobId)}&image=1`
         return h('div', { style: wrapStyle },
-          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96vw)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
+          h('img', { ref: forcedWidthRef, src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96vw)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -401,6 +452,7 @@ let openImageOverlay = null
     function PlanImage(props) {
       const { plan, index } = props
       const displayWidth = useImageWidth()
+      const forcedWidthRef = useForcedImageWidth(displayWidth, { width: '100%', 'max-width': 'min(660px, 96vw)' })
       // 一律先当 pending：宿主给的 status 可能已经过时（图还没真画好），靠轮询拿真实状态
       const [state, setState] = useState('pending')
       const [error, setError] = useState('')
@@ -454,7 +506,7 @@ let openImageOverlay = null
             h('span', { style: noteStyle }, '🎨 第 ' + (index + 1) + ' 张正在取回…（第 ' + imgRetry + ' 次）'))
         }
         return h('div', { style: wrapStyle },
-          h('img', { key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
+          h('img', { ref: forcedWidthRef, key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
             onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', ...imageWidthStyle({ width: '100%', maxWidth: 'min(660px, 96vw)' }, displayWidth), borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
       }
       if (state === 'failed') {
@@ -487,6 +539,11 @@ let openImageOverlay = null
       const [widthBarNote, setWidthBarNote] = React.useState('')
       // 图片当前实际显示宽度：直接读元素自身，不推断容器，也就不存在「测不准」。
       const imgRef = React.useRef(null)
+      const forcedWidthRef = useForcedImageWidth(displayWidth, { width: 'auto', 'max-width': 'min(660px, 96vw)', height: 'auto', 'max-height': 'none' })
+      // ref 回调必须稳定：每次渲染换新函数会让 React 先传 null 再传元素，反复触发 setState。
+      const setImgElBox = React.useRef(null)
+      if (!setImgElBox.current) setImgElBox.current = el => { imgRef.current = el; forcedWidthRef(el) }
+      const setImgEl = setImgElBox.current
       const [actualWidth, setActualWidth] = React.useState(0)
       const widthBarStart = React.useRef(0)
       // 手机适配：触屏上 dblclick 不可靠，自己认「两次快速轻点」；并短暂屏蔽随后合成的 click。
@@ -685,7 +742,7 @@ let openImageOverlay = null
           h('span', { style: { opacity: .5 } }, 'Esc 取消'),
         ) : null,
         showImage ? h('img', {
-          ref: imgRef,
+          ref: setImgEl,
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
           onError: () => setImgError('加载失败'),
           title: '点一下看大图 · 右键或长按改提示词 / 重画 · 双击调显示大小',

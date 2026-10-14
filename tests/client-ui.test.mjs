@@ -1143,8 +1143,8 @@ test('刷新后正文插图仍按保存的全局宽度显示：启动读一次 /
     item: { id: 'media-boot', textVersion: 'text-v3', status: 'ready', url: '/old.png', data: { jobId: 'job-old' } },
   })
   const officialImg = officialUi.nodes(official).find(node => node.type === 'img')
-  assert.equal(officialImg.props.style.width, '900px')
-  assert.equal(officialImg.props.style.maxWidth, '96vw', '量不到聊天区宽度时退回视口 96vw；量到后会用聊天区的 96%')
+  assert.equal(officialImg.props.style.width, '900px', '宽度给足，最终像素值由 useForcedImageWidth 用 !important 落到元素上')
+  assert.equal(officialImg.props.style.maxWidth, '96vw', '样式里的兜底上限，实际像素由 !important 强制')
   assert.equal(officialImg.props.style.height, 'auto', '高度仍按原比例，只改显示宽度')
   assert.equal(officialUi.requests.filter(request => request.path === 'state').length, reads, '正文渲染热路径里不允许有 /state 请求')
 
