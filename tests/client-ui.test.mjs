@@ -1110,12 +1110,12 @@ test('设置里保存正文图片显示宽度：输入过程不发请求，保�
   assert.deepEqual(saves[0].body, { config: { imageDisplayWidth: 900 } })
   assert.match(ui.text(ui.render()), /已保存：正文插图统一按 900 px 显示/)
 
-  // 超出范围的输入在前端就收窄到 160–1200，绝不让正文被撑爆。
+  // 超出范围的输入在前端就收窄到 160–2000，绝不让正文被撑爆。
   widthInput().props.onChange({ target: { value: '99999' } }); ui.render()
-  assert.match(ui.text(ui.render()), /1200 px/)
+  assert.match(ui.text(ui.render()), /2000 px/)
   await ui.button('保存').props.onClick()
   await settle(); ui.render()
-  assert.deepEqual(ui.requests.filter(request => request.path === 'config').at(-1).body, { config: { imageDisplayWidth: 1200 } })
+  assert.deepEqual(ui.requests.filter(request => request.path === 'config').at(-1).body, { config: { imageDisplayWidth: 2000 } })
 
   // 恢复默认 = 回到 0，也就是现有显示效果。
   await ui.button('恢复默认').props.onClick()

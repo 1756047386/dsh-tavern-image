@@ -139,14 +139,14 @@ test('正文图片显示宽度默认保持现有显示效果，保存后跨刷�
   assert.equal(persisted.imageDisplayWidth, 900)
 })
 
-test('正文图片显示宽度只接受 160–1200，异常值退回默认而不会写进配置', async t => {
+test('正文图片显示宽度只接受 160–2000，异常值退回默认而不会写进配置', async t => {
   const fixture = await makePluginFixture(t)
   const instance = await fixture.boot()
   const save = async value => (await instance.request('config', { config: { imageDisplayWidth: value } })).body.state.config.imageDisplayWidth
 
   // 过大的宽度不能把正文撑爆，过小的也要收到能看的下限。
-  assert.equal(await save(99999), 1200)
-  assert.equal(await save(4000), 1200)
+  assert.equal(await save(99999), 2000)
+  assert.equal(await save(4000), 2000)
   assert.equal(await save(10), 160)
   assert.equal(await save(159.6), 160)
   assert.equal(await save(160), 160)

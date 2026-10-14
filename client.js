@@ -268,12 +268,10 @@ let openImageOverlay = null
     // 只改正文里的显示宽度：不重采样原图、不改生成分辨率，点开后的全屏看图也不受影响。
     // 启动时从 /state 读一次（刷新/重启后依然生效），设置里保存成功后立刻更新。
     // 正文渲染只读这个变量 —— 每张图都不再单独发请求（渲染热路径上不允许有网络请求）。
-    const IMAGE_WIDTH_LIMIT = { min: 160, max: 1200, fallback: 660 }
+    const IMAGE_WIDTH_LIMIT = { min: 160, max: 2000, fallback: 660 }
     let bodyImageWidth = 0   // 0 = 没设置过，沿用正文原来的显示样式
-    // 聊天区（正文栏）实测宽度：图片显示上限 = 它的 96%，超过就被压住。
-    // 测量要点：Tavern 的插图容器是 flex + align-items:flex-start，**子项**宽度由内容（图片）决定，
-    // 拖大图片它跟着变大 —— 拿它当参照会得到 172/124 这种飘忽数字。必须向上找**块级**祖先。
-    let bodyContainerWidth = 0
+    // 说明：显示上限固定用视口宽度（最多铺满屏幕），不再去测「聊天区有多宽」——
+    // 那个值随面板变化（正文 873、图库 647），怎么量都会让人怀疑数字，不如直接不测。
     const imageWidthListeners = new Set()
 
     /** 归一化显示宽度：空值 / 非数字 / <= 0 一律当 0（默认）；其余夹进 160–1200 的整数。 */
@@ -282,24 +280,6 @@ let openImageOverlay = null
       const width = Number(value)
       if (!Number.isFinite(width) || width <= 0) return 0
       return Math.min(IMAGE_WIDTH_LIMIT.max, Math.max(IMAGE_WIDTH_LIMIT.min, Math.round(width)))
-    }
-
-    /**
-     * 从「祖先链」里挑出聊天区宽度。chain 是从近到远的测量结果，每项 { width, block }。
-     * 规则：取最宽的**块级**祖先，但排除掉视口本身（body 宽度≈视口，取它会让上限变成 96vw 而溢出聊天栏）；
-     * 被图片撑开的窄祖先（flex 子项）也会因为「更宽的那个更靠外」而被自然跳过。纯函数，方便单测与推演。
-     */
-    function pickContainerWidth(chain, viewport, capRatio = 0.98) {
-      const cap = Math.round((Number(viewport) || 0) * capRatio)
-      let best = 0
-      for (const item of Array.isArray(chain) ? chain : []) {
-        if (!item || !item.block) continue
-        const width = Math.round(Number(item.width) || 0)
-        if (!width) continue
-        if (cap && width > cap) continue
-        if (width > best) best = width
-      }
-      return best || Math.round(Number(viewport) || 0)
     }
 
     /** 配置变化时通知已挂载的正文图片，不用等宿主再次渲染消息。 */
@@ -328,10 +308,9 @@ let openImageOverlay = null
     function imageWidthStyle(defaults, configuredWidth) {
       if (!configuredWidth) return defaults
       // 展开 defaults：以后给默认样式加键（objectFit / aspectRatio 之类）不会在这里被悄悄丢掉。
-      // 上限：量到聊天区就用它的 96%（保证不撑出聊天栏），还没量到就用视口兜底。
-      // 不能用 96%：图片的父容器宽度恰好由图片自己撑开，百分比会反向依赖图片，形成循环把图锁死。
-      const limit = bodyContainerWidth ? Math.round(bodyContainerWidth * 0.96) + 'px' : '96vw'
-      return { ...defaults, width: configuredWidth + 'px', maxWidth: limit }
+      // 上限固定用视口宽度：设多大就显示多大，最多铺满屏幕，再大也不加。
+      // 不用百分比（图片的父容器宽度由图片自己撑开，会形成循环把图锁死），也不去猜聊天区有多宽。
+      return { ...defaults, width: configuredWidth + 'px', maxWidth: '96vw' }
     }
 
     /** 单张图：占位 → 轮询 → <img>。 */
@@ -506,30 +485,14 @@ let openImageOverlay = null
       const [widthBarOpen, setWidthBarOpen] = React.useState(false)
       const [widthDraft, setWidthDraft] = React.useState(0)
       const [widthBarNote, setWidthBarNote] = React.useState('')
+      // 图片当前实际显示宽度：直接读元素自身，不推断容器，也就不存在「测不准」。
+      const imgRef = React.useRef(null)
+      const [actualWidth, setActualWidth] = React.useState(0)
       const widthBarStart = React.useRef(0)
       // 手机适配：触屏上 dblclick 不可靠，自己认「两次快速轻点」；并短暂屏蔽随后合成的 click。
       const lastTapAt = React.useRef(0)
       const suppressTapUntil = React.useRef(0)
-      // 量聊天区宽度：从自己往上找第一个「块级」祖先 —— 它的宽度由父级决定，不会随图片大小变。
-      const wrapRef = React.useRef(null)
-      React.useEffect(() => {
-        const measure = () => {
-          const chain = []
-          let node = wrapRef.current
-          for (let hop = 0; hop < 10 && node; hop += 1) {
-            let display = ''
-            try { display = window.getComputedStyle ? (window.getComputedStyle(node).display || '') : '' } catch { display = '' }
-            let width = 0
-            try { width = node.getBoundingClientRect ? node.getBoundingClientRect().width : 0 } catch { width = 0 }
-            chain.push({ width, block: /^(block|flex|grid|flow-root|list-item|table)$/.test(display) })
-            node = node.parentElement
-          }
-          bodyContainerWidth = pickContainerWidth(chain, window.innerWidth)
-        }
-        measure()
-        window.addEventListener('resize', measure)
-        return () => window.removeEventListener('resize', measure)
-      }, [])
+
       const openWidthBar = () => {
         widthBarStart.current = normalizeImageWidth(displayWidth || 0)
         setWidthDraft(displayWidth || IMAGE_WIDTH_LIMIT.fallback)
@@ -555,6 +518,16 @@ let openImageOverlay = null
           setWidthBarNote('保存失败：' + String((error && error.message) || error))
         }
       }
+      React.useEffect(() => {
+        if (!widthBarOpen) return undefined
+        const read = () => {
+          const el = imgRef.current
+          if (el && el.getBoundingClientRect) setActualWidth(Math.round(el.getBoundingClientRect().width || 0))
+        }
+        read()
+        const timer = setTimeout(read, 180)   // 等宽度的过渡动画走完再读一次
+        return () => clearTimeout(timer)
+      }, [widthBarOpen, widthDraft, displayWidth])
       React.useEffect(() => {
         if (!widthBarOpen) return undefined
         const onKey = (event) => {
@@ -691,7 +664,7 @@ let openImageOverlay = null
       // TavernPluginMediaItem 会统一追加 figcaption；这里保留 alt 和预览标题即可。
       // 手机上手指出得准才行：按钮给足触控高度（38px 起），滑块在小屏上占更多宽度。
       const barBtn = { padding: '8px 14px', minHeight: '38px', fontSize: '12px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'transparent', color: '#dbe3ee', cursor: 'pointer' }
-      return h('div', { style: wrapStyle, ref: wrapRef },
+      return h('div', { style: wrapStyle },
         widthBarOpen ? h('div', {
           style: { position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '12px', zIndex: 2147483002, display: 'flex', gap: '8px', alignItems: 'center', padding: '10px 12px', paddingBottom: 'calc(10px + env(safe-area-inset-bottom, 0px))', borderRadius: '12px', background: 'rgba(23,26,33,.97)', border: '1px solid rgba(120,140,170,.4)', boxShadow: '0 12px 32px rgba(0,0,0,.5)', color: '#dbe3ee', fontSize: '12px', maxWidth: '96vw', flexWrap: 'wrap', boxSizing: 'border-box' },
         },
@@ -704,9 +677,7 @@ let openImageOverlay = null
             onChange: event => { const next = Number(event.target.value); setWidthDraft(next); setWidthBarNote(''); applyImageWidth(next) },
           }),
           h('span', { style: { minWidth: '56px' } }, widthDraft + ' px'),
-          bodyContainerWidth
-            ? h('span', { style: { opacity: .7 } }, '最多显示 ' + Math.min(widthDraft, Math.round(bodyContainerWidth * 0.96)) + ' px')
-            : null,
+          h('span', { style: { opacity: .7 } }, '实际 ' + (actualWidth || widthDraft) + ' px'),
           h('button', { type: 'button', style: barBtn, onClick: () => { void saveWidthBar(widthDraft) } }, '保存'),
           h('button', { type: 'button', style: barBtn, onClick: closeWidthBar }, '取消'),
           h('button', { type: 'button', style: barBtn, onClick: () => { void saveWidthBar(0) } }, '恢复默认'),
@@ -714,6 +685,7 @@ let openImageOverlay = null
           h('span', { style: { opacity: .5 } }, 'Esc 取消'),
         ) : null,
         showImage ? h('img', {
+          ref: imgRef,
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
           onError: () => setImgError('加载失败'),
           title: '点一下看大图 · 右键或长按改提示词 / 重画 · 双击调显示大小',
@@ -2842,11 +2814,11 @@ function versionsOf(jobId) {
          * 宽度对比：每条横条的长度 = 该数值的真实像素（1 : 1），共用同一把刻度尺，超宽横向滚动。
          * 不看图内容，只看长短 —— 这样一眼能看出「你设的宽度」「默认」「正文栏」谁宽谁窄。
          */
+        // 只列两个**确定**的值：设置值和默认值。聊天区宽度因面板不同而变，放进来只会让人怀疑数字。
         const compareRows = [
           { key: 'mine', label: '你设的宽度', width: previewWidth, color: '#8fb4ff', image: sampleSrc },
           { key: 'default', label: '默认', width: IMAGE_WIDTH_LIMIT.fallback, color: '#6b7480', dashed: true },
-          bodyContainerWidth ? { key: 'limit', label: '显示上限', width: Math.round(bodyContainerWidth * 0.96), color: '#e8c07a' } : null,
-        ].filter(Boolean)
+        ]
         const rulerBg = 'repeating-linear-gradient(to right, rgba(120,140,170,.18) 0 1px, transparent 1px 100px)'
         const compareBar = row => h('div', { key: row.key, style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' } },
           h('div', { style: { flex: '0 0 auto', width: '74px', fontSize: '10px', color: row.color, lineHeight: 1.3 } }, row.label),
@@ -2874,8 +2846,7 @@ function versionsOf(jobId) {
           h('div', { style: { marginTop: '10px' } },
             compareRows.map(compareBar),
             h('div', { style: { fontSize: '11px', color: '#8b93a1', marginTop: '7px', lineHeight: 1.6 } },
-              '结论：正文里实际显示 ' + (bodyContainerWidth ? Math.min(previewWidth, Math.round(bodyContainerWidth * 0.96)) + ' px' : previewWidth + ' px') +
-              (bodyContainerWidth ? '（聊天区 ' + bodyContainerWidth + ' px，最多显示 ' + Math.round(bodyContainerWidth * 0.96) + ' px）' : '') + '。'),
+              '最大只到铺满屏幕，再大也不会超出；实际显示多宽以正文为准 —— 双击插图，控制条会给出「设定 X px · 实际 Y px」。'),
           ),
           h('div', { style: Object.assign({}, S.row, { marginTop: '10px' }) },
             h('input', {
