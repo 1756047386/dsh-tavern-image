@@ -3,6 +3,8 @@ config.json
 definitions.json
 jobs-store.json
 plans-store.json
+diagnostics.json
+diagnostics/
 
 # 用户自己的东西
 backups/
