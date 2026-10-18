@@ -276,6 +276,10 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 
 提示词表达可选择自动、标签、自然语言或混合模式。自动模式会按生图渠道和 ComfyUI 模板选择表达方式：例如 NovelAI 更适合标签，OpenAI Images、Gemini 等渠道使用自然语言描述。
 
+ComfyUI 工作流模式下，自动模式看的是**默认工作流里的模型**：Z-Image、Lumina、Qwen-Image、HiDream、Flux 用自然语言，Anima 用混合，其他（SDXL、Illustrious、Pony 等）用标签。规划、人物宏展开和最终编译用同一个判断；自然语言模式下会去掉 `(tag:1.2)` 这类权重。
+
+世界书条目的 `backends` 除了写渠道名，还可以写 `tags`、`natural`、`mixed`：例如把「提示词写法」拆成两条，一条 `backends: ["natural"]`、一条 `backends: ["tags"]`，切换默认工作流后规划自动只看到对应的那条。
+
 预设在现有规划调用中使用，不会为应用预设再额外调用一次模型。正面指导和负面约束分开保存，切换渠道时也可以继续使用自己整理的风格资料。
 
 想保持一个故事的整体画风，可以固定一套预设；要改变某张图的镜头或气氛，则在这张图的提示词里单独修改。
