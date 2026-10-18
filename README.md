@@ -4,8 +4,6 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
-2.5.3 修正了 ComfyUI 离线后无法原位重试的问题，补齐 NovelAI 连接探测，并改善失败图片的显示。安装方法见下方「安装与第一次出图」。
-
 ## 2.6.0 更新
 
 - **受 PR 启发的额外改进**：
@@ -380,7 +378,9 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 
 ## 兼容与许可
 
-当前版本 **2.5.2**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.2.0`；角色历史另外需要 Tavern 插件接口 v2。
+当前版本 **2.6.0**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.3.0`，覆盖 DSH 0.1.5 与 0.2.x（含 DeepSeek Harness 0.2.1-rc.2 / Tavern 3.0）；角色历史另外需要 Tavern 插件接口 v2。
+
+在 DSH 0.2.1-rc.2 + Tavern 3.0.0 上核对过：插件 bundle 正常加载（宿主加载器返回 0 个被跳过的包），本插件调用的 14 个 Tavern 接口（`attach`、`update`、`remove`、`list`、`getTurn`、`readTurnData`、`saveTurnData`、`promptSection`、`onTurnSettled`、`onGameRemoved`、`onTimelineChanged`、`getCardContext`、`backgroundModel`、`apiVersion`）在 Tavern 3.0 中全部保留，3.0 相对 2.7 的接口变化是纯新增（例如 `versionSignal`）。
 
 为保留现有 DSH 安装的包解析兼容，包名和浏览器模块加载键仍使用 `dsh-tavern-comfy`；插件 ID、主接口前缀和新安装目录使用 `dsh-tavern-image`。
 

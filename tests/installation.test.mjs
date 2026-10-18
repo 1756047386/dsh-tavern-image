@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
@@ -12,10 +13,15 @@ const root = resolve(import.meta.dirname, '..')
 const installer = join(root, 'scripts', 'install-plugin.ps1')
 const packager = join(root, 'scripts', 'Package-DshTavernImage.ps1')
 const powershell = process.env.POWERSHELL_EXE || 'powershell.exe'
-const officialCli = process.env.DSH_CLI_PATH || join(
-  process.env.LOCALAPPDATA || '',
-  'Programs', 'DSH Desktop', 'resources', 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
-)
+// 官方桌面的 CLI 入口：旧版 DSH Desktop 是 asar 里的 bin.js，新版 DeepSeek Harness 是
+// <安装目录>\resources\runtime\cli\bin\dsh.cmd。都找不到时，依赖真实宿主的用例跳过。
+const officialCli = [
+  process.env.DSH_CLI_PATH,
+  process.env.DSH_DESKTOP_APP_EXECUTABLE && join(dirname(process.env.DSH_DESKTOP_APP_EXECUTABLE), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+  join(process.env.LOCALAPPDATA || '', 'Programs', 'DSH Desktop', 'resources', 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+  join(process.env.LOCALAPPDATA || '', 'Programs', 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+  join(process.env.ProgramFiles || '', 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+].filter(Boolean).find(candidate => existsSync(candidate))
 const testWithTimeout = (name, fn) => test(name, { timeout: 120_000 }, fn)
 const projectVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version
 const projectVersionPattern = new RegExp(projectVersion.replace(/\./g, '\\.'))
@@ -146,7 +152,7 @@ const minimalManifest = JSON.stringify({
 
 testWithTimeout('installer recognizes nested ZIPs, copies only package files, and registers link + bundle through official DSH CLI', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
-  if (!(await stat(officialCli).catch(() => null))) return t.skip('Official DSH Desktop CLI is not installed on this host')
+  if (!officialCli) return t.skip('Official DSH desktop CLI is not installed on this host')
 
   const sandbox = await makeSandbox(t)
   const packageArchive = join(sandbox.directory, 'nested-source.zip')
@@ -185,7 +191,7 @@ testWithTimeout('installer recognizes nested ZIPs, copies only package files, an
 
 testWithTimeout('installer rejects ZIP-slip paths before creating the plugin target', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
-  if (!(await stat(officialCli).catch(() => null))) return t.skip('Official DSH Desktop CLI is not installed on this host')
+  if (!officialCli) return t.skip('Official DSH desktop CLI is not installed on this host')
 
   const sandbox = await makeSandbox(t)
   const malicious = join(sandbox.directory, 'unsafe.zip')
@@ -205,7 +211,7 @@ testWithTimeout('installer rejects ZIP-slip paths before creating the plugin tar
 
 testWithTimeout('installer leaves an existing plugin directory and profile untouched', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
-  if (!(await stat(officialCli).catch(() => null))) return t.skip('Official DSH Desktop CLI is not installed on this host')
+  if (!officialCli) return t.skip('Official DSH desktop CLI is not installed on this host')
 
   const sandbox = await makeSandbox(t)
   await mkdir(sandbox.sourceTarget, { recursive: true })
@@ -293,6 +299,7 @@ testWithTimeout('automatic discovery skips roots without the target profile and 
 
 testWithTimeout('local install bundle contains a source ZIP with only the declared package files', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell packaging tests run on Windows')
+  if (!officialCli) return t.skip('Official DSH desktop CLI is not installed on this host')
   const sandbox = await makeSandbox(t)
   const bundle = join(sandbox.directory, 'install-bundle.zip')
   await runPowerShell([packager, '-OutputPath', bundle], { env: sandbox.env })
@@ -328,7 +335,7 @@ testWithTimeout('local install bundle contains a source ZIP with only the declar
 
 testWithTimeout('server download ZIP buffer installs through the official DSH CLI in an isolated profile', async t => {
   if (process.platform !== 'win32') return t.skip('PowerShell installation tests run on Windows')
-  if (!(await stat(officialCli).catch(() => null))) return t.skip('Official DSH Desktop CLI is not installed on this host')
+  if (!officialCli) return t.skip('Official DSH desktop CLI is not installed on this host')
 
   const sandbox = await makeSandbox(t)
   const archivePath = join(sandbox.directory, 'server-download.zip')
