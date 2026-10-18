@@ -20,8 +20,6 @@
 - **自动模式按默认工作流的模型选提示词写法**（Z-Image / Lumina / Qwen-Image / HiDream / Flux 用自然语言，Anima 用混合，其他用 tag）；世界书条目的 `backends` 也支持写 `tags` / `natural` / `mixed`，可把「提示词写法」拆成多条按写法触发。
 - **修 3 个 bug**：手动提示词与画师组重启后丢失；规划尺寸显示 `undefined`；自动备份无限增长。
 
-两个 PR 都顺手删除了 README 里 2.5.3 ~ 2.5.4.3 的更新记录，本次合并时**已恢复保留**。
-
 
 ## 插件的长处
 
