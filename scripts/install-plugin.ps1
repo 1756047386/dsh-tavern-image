@@ -219,19 +219,72 @@ function Get-ArchivePackageRoot([string] $ArchivePath, [string] $ExtractTo) {
   } finally { $zip.Dispose() }
 }
 
+# 官方桌面（DeepSeek Harness 0.2.x）把 CLI 放在 <安装目录>\resources\runtime\cli\bin\dsh.cmd，
+# 数据目录里不再有可直接运行的 bin.js；这里按「显式环境变量 → 注册表 → 常见安装位置」找回安装目录。
+function Get-OfficialDesktopRoots {
+  $roots = New-Object System.Collections.Generic.List[string]
+  if ($env:DSH_DESKTOP_APP_EXECUTABLE) {
+    try {
+      $exe = Get-AbsolutePath $env:DSH_DESKTOP_APP_EXECUTABLE
+      if (Test-Path -LiteralPath $exe -PathType Leaf) { $roots.Add((Split-Path -Parent $exe)) }
+    } catch { }
+  }
+  foreach ($key in @(
+      'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+    foreach ($entry in (Get-ItemProperty $key -ErrorAction SilentlyContinue)) {
+      if ($entry.DisplayName -like 'DeepSeek Harness*' -and $entry.InstallLocation -and (Test-Path -LiteralPath $entry.InstallLocation -PathType Container)) {
+        $roots.Add([string]$entry.InstallLocation)
+      }
+    }
+  }
+  foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if (-not $base) { continue }
+    $roots.Add((Join-Path $base 'Programs\DeepSeek Harness'))
+    $roots.Add((Join-Path $base 'DeepSeek Harness'))
+  }
+  return @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique)
+}
+
+# 官方桌面自带的 pnpm 不一定在 PATH 上（新版不会再往用户 PATH 里塞命令），
+# 而注册 Profile 依赖必须有 `pnpm` 命令；找不到时用运行时里的 pnpm 建临时垫片。
+function Add-DshPnpmShim([string] $NodeExe) {
+  if (Get-Command pnpm -ErrorAction SilentlyContinue) { return $null }
+  if (-not $NodeExe) { return $null }
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($root in (Get-OfficialDesktopRoots)) {
+    $candidates.Add((Join-Path $root 'resources\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.mjs'))
+    $candidates.Add((Join-Path $root 'resources\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.cjs'))
+  }
+  $pnpmEntry = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+  if (-not $pnpmEntry) { return $null }
+  $shimDir = Join-Path ([IO.Path]::GetTempPath()) ('dsh-tavern-pnpm-' + [guid]::NewGuid().ToString('N'))
+  $null = New-Item -ItemType Directory -Path $shimDir -Force
+  $shimText = '@echo off' + "`r`n" + '"' + $NodeExe + '" "' + $pnpmEntry + '" %*' + "`r`n"
+  [IO.File]::WriteAllText((Join-Path $shimDir 'pnpm.cmd'), $shimText, (New-Object Text.UTF8Encoding($false)))
+  return $shimDir
+}
+
 function Resolve-DshCli([string] $DshDataHome) {
   if ($DshCliPath) {
     $candidate = Get-AbsolutePath $DshCliPath
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "找不到指定的 DSH CLI：$candidate" }
     return $candidate
   }
+  # 新版官方桌面：启动器自带运行时，不依赖 PATH 上有 dsh
+  foreach ($root in (Get-OfficialDesktopRoots)) {
+    $launcher = Join-Path $root 'resources\runtime\cli\bin\dsh.cmd'
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) { return $launcher }
+  }
+  # 旧版 DSH Desktop：asar 解包目录里的 bin.js
   if ($env:LOCALAPPDATA) {
     $desktopCli = Join-Path $env:LOCALAPPDATA 'Programs\DSH Desktop\resources\app\node_modules\@deepseek-ai\dsh\lib\bin.js'
     if (Test-Path -LiteralPath $desktopCli -PathType Leaf) { return $desktopCli }
   }
   $command = Get-Command dsh -ErrorAction SilentlyContinue
   if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-  throw '未找到 DSH 官方 CLI。为避免只写依赖却漏掉 Profile bundle 注册，已停止安装；请先修复 DSH Desktop/CLI，再运行本脚本。'
+  throw '未找到 DSH 官方 CLI。为避免只写依赖却漏掉 Profile bundle 注册，已停止安装；请先安装/启动一次 DeepSeek Harness，或用 -DshCliPath 指定 CLI 路径，再运行本脚本。'
 }
 
 function Assert-NoReparsePoint([string] $Path, [string] $StopAt) {
@@ -428,10 +481,13 @@ try {
     }
     $oldHomeValue = $env:DSH_HOME
     $oldPathValue = $env:PATH
+    $pnpmShimPath = $null
     try {
       $env:DSH_HOME = $DshHome
       $runtimePath = Join-Path $DshHome 'runtime'
       if (Test-Path -LiteralPath $runtimePath -PathType Container) { $env:PATH = $runtimePath + [IO.Path]::PathSeparator + $env:PATH }
+      $pnpmShimPath = Add-DshPnpmShim $node.Source
+      if ($pnpmShimPath) { $env:PATH = $pnpmShimPath + [IO.Path]::PathSeparator + $env:PATH }
       $linkSpec = 'link:' + $pluginPath.Replace('\', '/')
       if ([IO.Path]::GetExtension($cliPath) -in @('.cmd', '.bat', '.ps1')) {
         & $cliPath plugin --profile $Profile add $linkSpec --ignore-scripts
@@ -442,6 +498,7 @@ try {
     } finally {
       $env:DSH_HOME = $oldHomeValue
       $env:PATH = $oldPathValue
+      if ($pnpmShimPath) { Remove-Item -LiteralPath $pnpmShimPath -Recurse -Force -ErrorAction SilentlyContinue }
     }
     $registeredManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $profilePath 'package.json') | ConvertFrom-Json
     $registeredSpec = [string]$registeredManifest.dependencies.$PackageName
