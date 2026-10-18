@@ -4,6 +4,15 @@
 
 可以用本地 ComfyUI、SD WebUI / Forge，也可以接 NovelAI、OpenAI Images、Gemini 等在线服务。人物资料、画风、提示词规则和图片记录在同一个面板里管理，适合给长篇角色扮演和故事配图。
 
+## 2.6.1 更新
+
+合并社区 PR #15（作者 1756047386）：适配 DSH 0.2.x / DeepSeek Harness 0.2.1（Tavern 3.0）。
+
+- **兼容范围放宽**：插件清单声明的 DSH 兼容范围从 `>=0.1.0-rc.8 <0.2.0` 扩到 `>=0.1.0-rc.8 <0.3.0`，同时覆盖 DSH 0.1.5 与 0.2.x（含 DeepSeek Harness 0.2.1-rc.2 / Tavern 3.0）。核对依据：本插件调用的 14 个 Tavern 接口（`attach` / `update` / `remove` / `list` / `getTurn` / `readTurnData` / `saveTurnData` / `promptSection` / `onTurnSettled` / `onGameRemoved` / `onTimelineChanged` / `getCardContext` / `backgroundModel` / `apiVersion`）在 Tavern 3.0 中全部保留，3.0 相对 2.7 是**纯新增**（例如 `versionSignal`）。
+- **安装脚本适配新版桌面**：官方桌面 0.2.x 把 CLI 放到 `<安装目录>\resources\runtime\cli\bin\dsh.cmd`，数据目录里不再有可直接运行的 `bin.js`。安装脚本现在按「环境变量 `DSH_DESKTOP_APP_EXECUTABLE` → 注册表卸载项 → 常见安装位置」找回安装目录，并**保留旧版 asar `bin.js` 与 PATH 两条回退路径**，旧安装不受影响。
+- **pnpm 缺失兜底**：新版桌面自带 pnpm 但不再写进用户 PATH，而注册 Profile 依赖必须有 `pnpm` 命令；找不到时用运行时里的 pnpm 建一个临时 shim，装完即清理。
+- 安装测试同步：CLI 入口改为多候选路径，一个都找不到时跳过依赖真实宿主的用例，而不是直接失败。
+
 ## 2.6.0 更新
 
 - **受 PR 启发的额外改进**：
