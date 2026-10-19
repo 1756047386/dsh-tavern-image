@@ -272,7 +272,7 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 
 | 文件或目录 | 内容 |
 |---|---|
-| `config.json` | 渠道、鉴权、模型和插件设置 |
+| `config.json` | 渠道、模型和插件设置（API Key 和鉴权密码存在 DSH 凭据服务里，见[凭据存储](docs/release-and-platform.md#凭据存储)） |
 | `definitions.json` | 人物、服装、场景和物件资料 |
 | `worldbook.json` | 自己维护的配图规则 |
 | `jobs-store.json`、`plans-store.json` | 图片作业与规划记录 |
