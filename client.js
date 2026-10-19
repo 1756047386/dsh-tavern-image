@@ -2747,6 +2747,25 @@ function versionsOf(jobId) {
             h('select', { 'aria-label': caption, value: current, style: full(), onChange: e => updateOption(key, e.target.value) },
               list.map(([value, text]) => h('option', { key: value, value, style: optStyle }, text))))
         }
+        // 宽 / 高分开填（NovelAI）：两个都填才覆盖，留空回落到旧的 size 文本或规划给的分辨率
+        const legacySize = (() => {
+          const m = String((localFields.options || {}).size ?? '').match(/^(\d{2,5})\s*[x×*]\s*(\d{2,5})$/i)
+          return m ? { width: m[1], height: m[2] } : { width: '', height: '' }
+        })()
+        const sizeValue = (key, fallback) => {
+          const raw = (localFields.options || {})[key]
+          const text = raw === undefined || raw === null ? '' : String(raw).trim()
+          return text && Number(text) > 0 ? text : String(fallback ?? '')
+        }
+        const setSizeValue = (key, value) => {
+          const next = Object.assign({}, localFields.options || {})
+          next.sizeWidth = sizeValue('sizeWidth', legacySize.width)
+          next.sizeHeight = sizeValue('sizeHeight', legacySize.height)
+          next[key] = String(value)
+          editChannel({ options: next })
+        }
+        const sizeField = (key, caption, placeholder, fallback) => h('div', { style: { marginBottom: '10px' } }, label(caption),
+          h('input', { 'aria-label': caption, type: 'number', min: '64', max: '8192', step: '64', value: sizeValue(key, fallback), placeholder, style: full(), onChange: e => setSizeValue(key, e.target.value) }))
         const modelSuggestions = channel ? [...new Set([
           providers.find(item => item.id === backend)?.model,
           ...(channelTestStatuses[channel.id]?.models || []),
@@ -2868,7 +2887,12 @@ function versionsOf(jobId) {
               h('div', { style: { marginBottom: '10px' } }, label('Uncond Scale'), h('input', { 'aria-label': 'Uncond Scale', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).uncondScale ?? 0), placeholder: '0 = 不改动', style: full(), onChange: e => updateOption('uncondScale', Number(e.target.value)) })),
               h('div', { style: { marginBottom: '10px' } }, label('Skip CFG Sigma'), h('input', { 'aria-label': 'Skip CFG Above Sigma', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).skipCfgAboveSigma ?? 0), placeholder: '0 = 不改动，常用 19', style: full(), onChange: e => updateOption('skipCfgAboveSigma', Number(e.target.value)) }))) : null,
             backend === 'openai' ? optionField('quality', '质量', 'auto') : null,
-            ['openai', 'novelai', 'sdwebui', 'qwen'].includes(backend) ? optionField('size', '尺寸覆盖（可选）', '例如：1024x1536') : null,
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(104px,1fr))', gap: '8px' } },
+              sizeField('sizeWidth', '宽（像素）', '如 832', legacySize.width),
+              sizeField('sizeHeight', '高（像素）', '如 1216', legacySize.height),
+              (sizeValue('sizeWidth', legacySize.width) && sizeValue('sizeHeight', legacySize.height)) ? null
+                : h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '10px', alignSelf: 'end', paddingBottom: '8px' } }, '宽高都填才覆盖；留空跟随规划给的分辨率')) : null,
+            ['openai', 'sdwebui', 'qwen'].includes(backend) ? optionField('size', '尺寸覆盖（可选）', '例如：1024x1536') : null,
             backend === 'seedream' ? optionField('size', '输出尺寸（可选）', '1K、1.5K、2K 或 2048x2048') : null,
             backend === 'gemini' ? optionField('imageSize', '输出分辨率（可选）', '1K、2K 或 4K') : null,
             ['gemini', 'novelai', 'sdwebui', 'qwen'].includes(backend) ? optionField('aspectRatio', '画面比例覆盖（可选）', '例如：2:3') : null,
