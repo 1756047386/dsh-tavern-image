@@ -581,9 +581,9 @@ test('plugin update routes enforce methods and reject cross-origin or non-JSON i
   assert.equal((await f.request('plugin-update/apply', {}, 'POST', { origin: 'https://example.invalid' })).status, 403)
   assert.equal((await f.request('plugin-update/apply', {}, 'POST', { 'content-type': 'text/plain' })).status, 403)
   const status = await f.request('plugin-update', undefined, 'GET')
-  assert.equal(status.status, 200); assert.equal(status.body.supported, false)
+  assert.equal(status.status, 200); assert.equal(status.body.supported, true); assert.equal(status.body.mode, 'release')
   const update = await f.request('plugin-update/apply', { target: 'a'.repeat(40) })
-  assert.equal(update.status, 400); assert.match(update.body.error, /先检查更新/)
+  assert.equal(update.status, 400); assert.match(update.body.error, /先检查.*更新/)
 })
 
 const imageChannel = { id: 'primary', provider: 'openai', name: '测试渠道', baseUrl: 'https://image.test/v1', model: 'gpt-image-1', apiKey: 'fixture-secret', options: {} }

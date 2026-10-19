@@ -39,7 +39,7 @@
 
 安装器默认使用 `%USERPROFILE%\.dsh` 下的 `tavern` Profile；可通过 `-Profile` 指定另一个**已经存在**的 Profile。安装器只安装插件源码，不运行仓库脚本；它调用 DSH 官方 CLI 的 `plugin add`，附带 `--ignore-scripts`，由 DSH 将依赖、`node_modules` 链接和 bundle 一起登记。若 `tools/dsh-tavern-image` 或 Profile 中已有同名依赖，安装器会停止，不覆盖已有内容；更新已安装插件请用插件自己的更新页。
 
-已发布的离线安装包可从 [GitHub 发布页](https://github.com/weixinlll/dsh-tavern-image/releases)下载。解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包和 SHA-256 校验文件。请核对发布版本；需要最新的 2.5.3 修复时，可用下方的源码 ZIP 安装方式。
+已发布的离线安装包可从 [GitHub 发布页](https://github.com/weixinlll/dsh-tavern-image/releases)下载。解压后双击 `Install-DshTavernImage.cmd`，安装器直接使用包内源码，不必再从 GitHub 下载。发布页也提供独立源码包（dsh-tavern-image-source.zip）和 SHA256SUMS 校验文件。下载后先核对 SHA-256，再安装。请核对发布版本；需要最新的 2.5.3 修复时，可用下方的源码 ZIP 安装方式。
 
 也可以在 GitHub 仓库页选择 **Code → Download ZIP**，解压后双击 `scripts\Install-DshTavernImage.cmd`（同目录有 `install-plugin.ps1`）。浏览器下载 [GitHub Archive ZIP](https://github.com/weixinlll/dsh-tavern-image/archive/refs/heads/master.zip) 或 [codeload ZIP](https://codeload.github.com/weixinlll/dsh-tavern-image/zip/refs/heads/master) 后，可以在 PowerShell 中指定文件：
 
@@ -88,7 +88,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\dsh-tavern-image-
 
 运行 `scripts\Package-DshTavernImage.ps1` 可生成可离线携带的 ZIP；解压后双击其中的 `Install-DshTavernImage.cmd`。插件 **设置 → 本地生图 → 插件更新**页的“本机安装包”入口也可导出源码 ZIP，拷贝到目标电脑后用 `-SourceArchive` 安装。这个入口用于下载和转移安装包；当前 DSH Desktop 的插件清单页没有经验证的 GitHub URL/ZIP 安装输入框，不要在该页粘贴仓库网址。
 
-安装器会显示插件版本和 ZIP 的 SHA-256，发布页也提供 `SHA256SUMS.txt`，下载后可以比对文件是否完整。安装后完整退出并重新打开 DSH Desktop，刷新网页不能替代宿主重启。
+安装器会显示插件版本和 ZIP 的 SHA-256。发布资产的 SHA256SUMS 按标准 sha256sum 格式列出每个 ZIP 的摘要；它可检测下载损坏，只有校验清单来自可信发布渠道时才可用于确认资产来源。安装后完整退出并重新打开 DSH Desktop，刷新网页不能替代宿主重启。
 
 ### 旧版目录迁移
 
@@ -327,3 +327,6 @@ node $dshCli plugin --profile tavern add "link:$env:USERPROFILE/.dsh/profile-dat
 界面与功能设计参考了 [st-chatu8](https://github.com/damoshen123/st-chatu8/tree/50f0d200caea17c448e80432f1b54d65ed8ce9cd) 和 [柏宝绘](https://github.com/baibai-git/ST-BaiBai-Image)。
 
 采用 [MIT 许可证](LICENSE)。随包使用的图片编解码库说明见 [第三方声明](lib/vendor/NOTICE.md)。
+
+
+更多更新流程、当前凭据存储边界和移动设备限制见 [更新、凭据与移动设备说明](docs/release-and-platform.md)。

@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string] $OutputPath)
+param([string] $OutputPath, [string] $SourceOutputPath)
 
 $ErrorActionPreference = 'Stop'
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -53,7 +53,7 @@ try {
           if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "lib 包含 junction 或符号链接：$($item.FullName)" }
           if ($item.PSIsContainer) { $pending.Push($item.FullName) }
           else {
-            $relative = $item.FullName.Substring($libRoot.Length + 1).Replace('\', '/')
+            $relative = $item.FullName.Substring($libRoot.Length + 1).Replace([string][char]92, '/')
             Add-SourceTreeToZip $archive $RepositoryRoot ("lib/$relative")
           }
         }
@@ -65,6 +65,7 @@ try {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-DshTavernImage.cmd') -Destination $BundleRoot
   if (Test-Path -LiteralPath $OutputPath) { throw "输出文件已存在，不会覆盖：$OutputPath" }
   [IO.Compression.ZipFile]::CreateFromDirectory($BundleRoot, $OutputPath, [IO.Compression.CompressionLevel]::Optimal, $false)
+  if ($SourceOutputPath) { Copy-Item -LiteralPath $SourceZip -Destination $SourceOutputPath }
   $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RepositoryRoot 'package.json') | ConvertFrom-Json
   $algorithm = [Security.Cryptography.SHA256]::Create()
   $stream = [IO.File]::OpenRead($OutputPath)
