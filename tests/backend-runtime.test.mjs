@@ -29,6 +29,7 @@ async function runtime(t, stream, definitions = {}, options = {}) {
   await writeFile(join(root, 'worldbook.json'), JSON.stringify({ name: 'test', entries: [] }))
   await writeFile(join(root, 'definitions.json'), JSON.stringify(definitions))
   if (options.initialJobs) await writeFile(join(root, 'jobs-store.json'), JSON.stringify(options.initialJobs))
+  if (options.initialConfig) await writeFile(join(root, 'config.json'), JSON.stringify(options.initialConfig))
   await writeFile(join(root, 'workflows', 'test.json'), JSON.stringify({
     format: 'dsh-tavern-comfy-v1', outputNode: '2',
     prompt: { '1': { class_type: 'CLIPTextEncode', inputs: { text: '' } }, '2': { class_type: 'SaveImage', inputs: { images: ['1', 0] } } },
@@ -56,6 +57,7 @@ async function runtime(t, stream, definitions = {}, options = {}) {
     llm: { stream: args => stream(args, { events, submitted, firstPrompt }) },
     ...(options.tavern ? { tavern: options.tavern } : {}),
     ...(options.attachments ? { attachments: options.attachments } : {}),
+    ...(options.credentials ? { credentials: options.credentials } : {}),
     webServer: { register({ path, handler }) { routes.set(path, handler); return () => routes.delete(path) } },
     inject(names, install) { if (names.every(name => this[name])) install(this) },
     effect(install) { const off = install(); if (typeof off === 'function') disposes.push(off); return off },
@@ -614,6 +616,37 @@ test('a Chinese-only Comfy plan fails before any image job or GPU submission', a
   assert.match(result.body.error, /英文提示词/)
   assert.deepEqual(f.submitted, [])
   assert.equal((await f.request('history', undefined, 'GET')).body.jobs.length, 0)
+})
+
+test('with DSH credentials, keys live in the vault: plaintext migrates, saves and clears never write config.json', async t => {
+  const values = new Map()
+  const credentials = {
+    async resolve(ref) { return values.has(ref) ? { value: values.get(ref), source: 'test' } : undefined },
+    async set(ref, value) { values.set(ref, value) },
+    async unset(ref) { values.delete(ref) },
+  }
+  const f = await runtime(t, async function* () {}, {}, { credentials,
+    initialConfig: { imageBackend: 'openai', activeImageChannel: 'primary', imageChannels: [imageChannel], comfyAuthMode: 'bearer', comfyAuthToken: 'comfy-plain' } })
+  const file = async () => JSON.parse(await readFile(join(f.root, 'config.json'), 'utf8'))
+  const initial = await f.request('state', undefined, 'GET')
+  const channel = initial.body.config.imageChannels[0]
+  assert.equal(channel.hasApiKey, true)
+  assert.equal(initial.body.config.comfyHasAuthToken, true)
+  let stored = await file()
+  assert.equal(stored.imageChannels[0].apiKey, '')
+  assert.equal(stored.comfyAuthToken, '')
+  assert.equal(stored.credentialRefs.length, 2)
+  assert.deepEqual([...values.values()].sort(), ['comfy-plain', 'fixture-secret'])
+
+  await f.request('config', { imageChannels: [{ ...channel, apiKey: 'rotated-secret' }] })
+  stored = await file()
+  assert.equal(JSON.stringify(stored).includes('rotated-secret'), false)
+  assert.equal([...values.values()].includes('rotated-secret'), true)
+
+  await f.request('config', { imageChannels: [{ ...channel, clearApiKey: true }], clearComfyAuthToken: true })
+  assert.equal(values.size, 0)
+  assert.deepEqual((await file()).credentialRefs, [])
+  assert.equal((await f.request('state', undefined, 'GET')).body.config.imageChannels[0].hasApiKey, false)
 })
 
 test('channel saves preserve omitted credentials, support explicit clearing and never echo secrets', async t => {
