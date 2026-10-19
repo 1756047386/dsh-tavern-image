@@ -2701,6 +2701,52 @@ function versionsOf(jobId) {
           label(caption), h('input', { 'aria-label': caption, type, value: String(localFields[fieldName] ?? ''), placeholder: placeholder || '', style: full(), onChange: e => editChannel({ [fieldName]: e.target.value }) }))
         const optionField = (key, caption, placeholder, type = 'text') => h('div', { style: { marginBottom: '10px' } },
           label(caption), h('input', { 'aria-label': caption, type, value: String((localFields.options || {})[key] ?? ''), placeholder: placeholder || '', style: full(), onChange: e => updateOption(key, type === 'number' ? Number(e.target.value) : e.target.value) }))
+        // NovelAI 常用模型 / 采样器 / 噪点表（下拉候选；不在表里的旧值会作为「当前值」保留）
+        const NAI_MODEL_OPTIONS = [
+          ['nai-diffusion-4-5-full', 'V4.5 Full（默认）'],
+          ['nai-diffusion-4-5-curated', 'V4.5 Curated'],
+          ['nai-diffusion-4-5-full-inpainting', 'V4.5 Full · 重绘'],
+          ['nai-diffusion-4-5-curated-inpainting', 'V4.5 Curated · 重绘'],
+          ['nai-diffusion-4-full', 'V4 Full'],
+          ['nai-diffusion-4-curated-preview', 'V4 Curated'],
+          ['nai-diffusion-4-full-inpainting', 'V4 Full · 重绘'],
+          ['nai-diffusion-4-curated-inpainting', 'V4 Curated · 重绘'],
+          ['nai-diffusion-3-full', 'V3 Full'],
+          ['nai-diffusion-3-curated', 'V3 Curated'],
+          ['nai-diffusion-3', 'V3 Anime'],
+          ['nai-diffusion-3-inpainting', 'V3 · 重绘'],
+          ['nai-diffusion-furry-3', 'V3 Furry'],
+          ['nai-diffusion-furry-3-inpainting', 'V3 Furry · 重绘'],
+        ]
+        const NAI_SAMPLER_OPTIONS = [
+          ['k_euler_ancestral', 'Euler Ancestral（常用）'],
+          ['k_euler', 'Euler'],
+          ['k_dpmpp_2m', 'DPM++ 2M'],
+          ['k_dpmpp_2s_ancestral', 'DPM++ 2S Ancestral'],
+          ['k_dpmpp_sde', 'DPM++ SDE'],
+          ['k_dpmpp_2m_sde', 'DPM++ 2M SDE'],
+          ['ddim_v3', 'DDIM'],
+          ['k_lms', 'LMS（V3 及以前）'],
+          ['k_heun', 'Heun（V3 及以前）'],
+          ['k_dpm_2', 'DPM2（V3 及以前）'],
+          ['k_dpm_2_ancestral', 'DPM2 Ancestral（V3 及以前）'],
+        ]
+        const NAI_NOISE_OPTIONS = [
+          ['karras', 'Karras（常用）'],
+          ['native', 'Native'],
+          ['exponential', 'Exponential'],
+          ['polyexponential', 'Polyexponential'],
+        ]
+        const storedOption = key => String((localFields.options || {})[key] ?? '')
+        const selectOptionField = (key, caption, items, fallback) => {
+          const stored = storedOption(key)
+          const current = stored || fallback
+          const known = items.some(([value]) => value === current)
+          const list = known ? items : [[current, current + '（当前值，不在列表里）'], ...items]
+          return h('div', { style: { marginBottom: '10px' } }, label(caption),
+            h('select', { 'aria-label': caption, value: current, style: full(), onChange: e => updateOption(key, e.target.value) },
+              list.map(([value, text]) => h('option', { key: value, value, style: optStyle }, text))))
+        }
         const modelSuggestions = channel ? [...new Set([
           providers.find(item => item.id === backend)?.model,
           ...(channelTestStatuses[channel.id]?.models || []),
@@ -2708,6 +2754,17 @@ function versionsOf(jobId) {
         const modelInput = channel ? h('div', { style: { marginBottom: '10px' } },
           label('模型'), h('input', { 'aria-label': '模型', list: 'image-models-' + channel.id, type: 'text', value: String(localFields.model ?? ''), placeholder: '选择建议模型或填写自定义模型 ID', style: full(), onChange: e => editChannel({ model: e.target.value }) }),
           modelSuggestions.length ? h('datalist', { id: 'image-models-' + channel.id }, modelSuggestions.map(model => h('option', { key: model, value: model }))) : null) : null
+        // NovelAI：模型用下拉选，不在候选表里的自定义 ID 仍可手填
+        const naiModelField = channel ? (() => {
+          const current = String(localFields.model ?? '')
+          const known = NAI_MODEL_OPTIONS.some(([value]) => value === current)
+          return h('div', { style: { marginBottom: '10px' } },
+            label('模型'),
+            h('select', { 'aria-label': '模型', value: known ? current : '__custom__', style: full(), onChange: e => editChannel({ model: e.target.value === '__custom__' ? '' : e.target.value }) },
+              NAI_MODEL_OPTIONS.map(([value, text]) => h('option', { key: value, value, style: optStyle }, text)),
+              h('option', { key: '__custom__', value: '__custom__', style: optStyle }, '自定义 / 未列出的模型 ID…')),
+            known ? null : h('input', { 'aria-label': '自定义模型 ID', type: 'text', value: current, placeholder: '填 NovelAI 模型 ID，例如 nai-diffusion-4-5-full；留空 = 用默认 V4.5 Full', style: Object.assign({}, full(), { marginTop: '6px' }), onChange: e => editChannel({ model: e.target.value }) }))
+        })() : null
         const generatePathPlaceholder = ({ novelai: '/ai/generate-image', openai: '/images/generations', 'gemini-chat': '/chat/completions', grok: '/images/generations', seedream: '/images/generations', qwen: '/services/aigc/multimodal-generation/generation', sdwebui: '/sdapi/v1/txt2img' })[backend]
         const authMode = String(config.comfyAuthMode ?? 'none')
         const saveComfy = async () => {
@@ -2787,7 +2844,7 @@ function versionsOf(jobId) {
             ),
             field('name', '渠道名称', '例如：个人 API / 公司中转'),
             field('baseUrl', 'API 根地址', 'https://api.example.com/v1'),
-            modelInput,
+            backend === 'novelai' ? naiModelField : modelInput,
             h('div', { style: { marginBottom: '10px' } }, label('鉴权方式'), h('select', { 'aria-label': '鉴权方式', value: localFields.authMode || 'bearer', style: full(), onChange: e => editChannel({ authMode: e.target.value }) },
               h('option', { value: 'bearer', style: optStyle }, 'Bearer API Key'), h('option', { value: 'none', style: optStyle }, '无需鉴权'), h('option', { value: 'basic', style: optStyle }, 'Basic 用户名 / 密码'))),
             localFields.authMode === 'basic' ? h('div', null,
@@ -2799,9 +2856,17 @@ function versionsOf(jobId) {
               label('API Key', channel.hasApiKey ? '已保存；留空保留原 Key' : ''),
               h('input', { 'aria-label': '渠道 API Key', type: 'password', value: channelDraft.apiKey || '', placeholder: channel.hasApiKey ? '已保存，留空可保留' : '粘贴 API Key', style: full(), onChange: e => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { apiKey: e.target.value, clearApiKey: false }) })); markSecretEdited(channel.id) } }),
               channel.hasApiKey ? h('button', { style: buttonStyle, onClick: () => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { clearApiKey: true, apiKey: '' }) })); markSecretEdited(channel.id) } }, '清除已保存 Key') : null) : null,
-            ['novelai', 'sdwebui'].includes(backend) ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: '8px' } },
-              optionField('steps', '步数', backend === 'novelai' ? '28' : '20', 'number'), optionField('cfg', 'CFG', backend === 'novelai' ? '5' : '7', 'number'), optionField('sampler', '采样器', backend === 'novelai' ? 'k_euler_ancestral' : 'Euler a')) : null,
-            backend === 'novelai' ? optionField('noiseSchedule', 'Noise schedule', 'karras') : null,
+            backend === 'sdwebui' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: '8px' } },
+              optionField('steps', '步数', '20', 'number'), optionField('cfg', 'CFG', '7', 'number'), optionField('sampler', '采样器', 'Euler a')) : null,
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '8px' } },
+              selectOptionField('sampler', '采样器', NAI_SAMPLER_OPTIONS, 'k_euler_ancestral'),
+              selectOptionField('noiseSchedule', '噪点表（Noise Schedule）', NAI_NOISE_OPTIONS, 'karras')) : null,
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(104px,1fr))', gap: '8px' } },
+              optionField('steps', '步数', '28', 'number'),
+              optionField('cfg', 'CFG', '5', 'number'),
+              h('div', { style: { marginBottom: '10px' } }, label('CFG Rescale'), h('input', { 'aria-label': 'CFG Rescale', type: 'number', step: '0.01', min: '0', max: '1', value: String((localFields.options || {}).cfgRescale ?? 0), placeholder: '0 ~ 1，0 = 关', style: full(), onChange: e => updateOption('cfgRescale', Number(e.target.value)) })),
+              h('div', { style: { marginBottom: '10px' } }, label('Uncond Scale'), h('input', { 'aria-label': 'Uncond Scale', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).uncondScale ?? 0), placeholder: '0 = 不改动', style: full(), onChange: e => updateOption('uncondScale', Number(e.target.value)) })),
+              h('div', { style: { marginBottom: '10px' } }, label('Skip CFG Sigma'), h('input', { 'aria-label': 'Skip CFG Above Sigma', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).skipCfgAboveSigma ?? 0), placeholder: '0 = 不改动，常用 19', style: full(), onChange: e => updateOption('skipCfgAboveSigma', Number(e.target.value)) }))) : null,
             backend === 'openai' ? optionField('quality', '质量', 'auto') : null,
             ['openai', 'novelai', 'sdwebui', 'qwen'].includes(backend) ? optionField('size', '尺寸覆盖（可选）', '例如：1024x1536') : null,
             backend === 'seedream' ? optionField('size', '输出尺寸（可选）', '1K、1.5K、2K 或 2048x2048') : null,
