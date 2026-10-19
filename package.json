@@ -41,6 +41,9 @@
     "compatibility": {
       "dsh": ">=0.1.0-rc.8 <0.3.0",
       "tavernApiVersion": 1
+    },
+    "tavern": {
+      "sceneImages": "delegate"
     }
   },
   "license": "MIT",

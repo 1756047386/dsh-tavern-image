@@ -35,7 +35,7 @@ const absoluteBase = (() => {
   try { if (location.origin) candidates.push(location.origin) } catch {}
   try { if (document.baseURI) candidates.push(new URL(document.baseURI).origin) } catch {}
   const origin = candidates.find(o => o && o !== 'null' && /^https?:/i.test(o))
-  return (origin || '') + '/plugins/dsh-tavern-image'
+  return (origin || '') + '/api/dsh-tavern-image'
 })()
 const BASE = absoluteBase
 
@@ -4824,7 +4824,7 @@ function versionsOf(jobId) {
             const value = String(downloads.local ?? '')
             if (!value.startsWith('/') || value.startsWith('//')) return ''
             const url = new URL(value, window.location.origin)
-            const validPath = ['/plugins/dsh-tavern-image/plugin-download', '/plugins/dsh-tavern-comfy/plugin-download'].includes(url.pathname)
+            const validPath = ['/api/dsh-tavern-image/plugin-download', '/api/dsh-tavern-comfy/plugin-download', '/plugins/dsh-tavern-image/plugin-download', '/plugins/dsh-tavern-comfy/plugin-download'].includes(url.pathname)
             return url.origin === window.location.origin && validPath && !url.username && !url.password && !url.search && !url.hash ? url.pathname : ''
           } catch { return '' }
         })()
