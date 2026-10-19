@@ -87,6 +87,7 @@ test('three black images in a row fail with a clear message, retries only change
   const job = await f.waitDone(r.body?.id ?? r.body?.job?.id)
   assert.equal(job.state, 'failed')
   assert.match(job.error, /全黑/)
+  assert.doesNotMatch(job.error, /换成 fp32 版/, 'switching to fp32 on top of a loaded bf16 model lost the GPU on Arc B580')
   assert.equal(f.submitted.length, 3)
   assert.deepEqual(f.submitted.map(b => b.prompt['8'].inputs.dtype), ['bf16', 'bf16', 'bf16'], 'retries never switch precision (fp32 on top of a loaded bf16 model lost the GPU)')
 })
