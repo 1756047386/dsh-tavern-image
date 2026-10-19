@@ -3101,6 +3101,7 @@ function versionsOf(jobId) {
                 : h('textarea', { 'aria-label': '批量编辑内容', value: peopleBatchValue, placeholder: '填写要应用到所选角色的内容', rows: 3, style: Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box', fontFamily: 'inherit' }), onChange: event => setPeopleBatchValue(event.target.value) }),
             h('div', { style: S.row },
               h('button', { style: buttonStyle, disabled: !picked.length, onClick: applyBatch }, '应用到所选角色'),
+              h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(242,104,107,.65)', color: '#f2686b' }), disabled: !picked.length, onClick: deletePicked }, '删除所选'),
               h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, peopleBatchField === 'cards' && peopleBatchMode === 'replace' && !peopleBatchCards.length ? '未选卡片时清除绑定，所有卡片都能使用' : peopleBatchMode === 'replace' && peopleBatchField !== 'enabled' ? '覆盖会替换原内容；文本留空会清空该字段' : '应用后点保存即可写入人物库'),
             ),
             peopleBatchNote ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2' } }, peopleBatchNote) : null,
@@ -3166,6 +3167,44 @@ function versionsOf(jobId) {
           const outfitId = characters[index]?.outfits?.[position]?.id
           patch(index, person => ({ outfits: (person.outfits || []).map(outfit => outfit.id === outfitId ? Object.assign({}, outfit, changes) : outfit) }))
         }
+        /** 批量删除所选角色（立即写盘） */
+        function deletePicked() {
+          const ids = picked.map(person => person.id)
+          if (!ids.length) { setPeopleBatchNote('请先选择角色'); return }
+          const names = picked.map(person => person.name || '未命名角色').join('、')
+          if (typeof window !== 'undefined' && !window.confirm('确定删除这 ' + ids.length + ' 个角色？\n' + names)) return
+          setCharacters(current => current.filter(person => !ids.includes(person.id)))
+          setPeoplePicked({})
+          setPeopleBatchNote('正在保存删除…')
+          commit(true).then(saved => {
+            setPeopleBatchNote(saved ? ('已删除 ' + ids.length + ' 个角色') : '已从列表移除，但保存失败，请点「保存人物库」重试')
+            if (saved && typeof showToast === 'function') showToast('已删除 ' + ids.length + ' 个角色')
+          })
+        }
+
+        /** 从当前会话的世界书导入成年角色 */
+        async function importFromCard() {
+          try {
+            setNote('正在读取世界书…')
+            const result = await post('/import-characters', {})
+            if (result?.state) receiveState(result.state)
+            const added = result?.added || []
+            const updated = result?.updated || []
+            const parts = []
+            if (added.length) parts.push('新增 ' + added.join('、'))
+            if (updated.length) parts.push('补全 ' + updated.join('、'))
+            const message = parts.length ? ('从世界书导入：' + parts.join('；')) : '世界书里没有可导入的新角色'
+            setNote(message)
+            if (typeof showToast === 'function') showToast(message)
+            return result
+          } catch (error) {
+            const message = '导入失败：' + (error?.message ?? error)
+            setNote(message)
+            if (typeof showToast === 'function') showToast(message)
+            return null
+          }
+        }
+
         function commit(silent) {
           // 排队写入，并在真正开始时读取最新草稿；并行设计完成不会互相覆盖整库。
           const pending = librarySaveQueue.current.then(async () => {
@@ -3552,6 +3591,7 @@ function versionsOf(jobId) {
           ),
           h('div', { style: Object.assign({}, S.row, { marginTop: '8px' }) },
             h('button', { style: buttonStyle, onClick: addCharacter }, '新增角色'),
+            h('button', { style: buttonStyle, onClick: importFromCard }, '从当前卡导入'),
             h('button', { style: buttonStyle, disabled: !activeCharacter, onClick: () => copyCharacter(activeCharacter) }, '复制当前角色'),
             h('button', { style: buttonStyle, disabled: !activeCharacter, onClick: () => activeCharacter && pickPhoto(activeCharacter) }, '从照片识别'),
             h('button', { style: buttonStyle, onClick: designPeople }, '让 agent 设计角色'),
