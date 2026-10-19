@@ -4162,6 +4162,16 @@ function versionsOf(jobId) {
         function keywordValues(entry) {
           return Array.isArray(entry.keywords) ? entry.keywords : []
         }
+        function andKeywordValues(entry) {
+          return Array.isArray(entry.andKeywords) ? entry.andKeywords : []
+        }
+        /** 草稿里可能是字符串（正在打字）也可能是数组（刚提交），统一成输入框文本。 */
+        function draftKeywordText(drafts, index, entry, field) {
+          const draft = drafts?.[index]?.[field]
+          if (Array.isArray(draft)) return draft.join('，')
+          if (typeof draft === 'string') return draft
+          return (field === 'andKeywords' ? andKeywordValues(entry) : keywordValues(entry)).join('，')
+        }
         function backendValues(entry) {
           const draft = wbDrafts[entry.index]?.backends
           return Array.isArray(draft) ? draft : Array.isArray(entry.backends) ? entry.backends : []
@@ -4170,7 +4180,8 @@ function versionsOf(jobId) {
           if (typeof value === 'string') return value
           if (value && typeof value === 'object') {
             const reasons = {
-              always: '常驻规则', 'keyword-match': '正文命中关键词', 'keyword-miss': '正文未命中关键词',
+              always: '常驻规则', 'keyword-match': '正文命中关键词', 'keyword-and-match': '正文命中关键词 + 附加条件', 'keyword-miss': '正文未命中关键词',
+              'and-miss': '命中关键词但没命中附加条件（AND）',
               'empty-keywords': '未设置关键词', 'empty-content': '条目内容为空', disabled: '条目已停用', 'backend-mismatch': '不适用于当前渠道',
               'not-selected': '本次规划未选择', 'name-match': '正文提及角色',
               'fallback-no-name-match': '没有匹配到角色名称，使用角色回退列表', 'not-mentioned': '正文未提及角色',
@@ -4308,10 +4319,13 @@ function versionsOf(jobId) {
                     '常驻：每轮都作为画图规则发送'),
                   h('label', { style: Object.assign({}, S.row, { fontSize: '12px' }) },
                     h('input', { type: 'radio', name: 'wb-activation-' + entry.index, value: 'keywords', checked: (wbDrafts[entry.index]?.activation ?? entry.activation) === 'keywords', onChange: () => patchEntry(entry.index, { activation: 'keywords' }, false, '触发方式') }),
-                    '关键词触发：正文命中下方任一词时发送'),
+                    '关键词触发：正文命中下方任一词时发送（填了附加条件就还要再命中一个）'),
                   (wbDrafts[entry.index]?.activation ?? entry.activation) === 'keywords' ? h('div', { style: { marginTop: '6px' } },
                     h('textarea', { 'aria-label': '触发关键词 ' + entry.index, value: wbDrafts[entry.index]?.keywords ?? keywordValues(entry).join('，'), placeholder: '例如：雨夜，咖啡馆（逗号、中文逗号或换行分隔）', style: Object.assign({}, ta, { minHeight: '54px' }), onChange: e => patchEntrySoon(entry.index, { keywords: e.target.value.split(/[，,\n\r]+/).map(value => value.trim()).filter(Boolean) }, '关键词', { keywords: e.target.value }) }),
                     (wbDrafts[entry.index]?.keywords ?? keywordValues(entry).join('，')).split(/[，,\n\r]+/).map(value => value.trim()).filter(Boolean).length === 0 ? h('div', { role: 'alert', style: { color: '#f2a36b', fontSize: '11px', marginTop: '4px' } }, '没有关键词：此条目不会注入。请填写至少一个词，或改为常驻。') : null,
+                    h('div', { style: { fontSize: '11px', color: '#9aa3b2', margin: '8px 0 3px' } }, '附加条件 AND（可留空）：主关键词命中后，还要命中这里的任意一个词，才注入这条'),
+                    h('textarea', { 'aria-label': '附加条件 ' + entry.index, value: draftKeywordText(wbDrafts, entry.index, entry, 'andKeywords'), placeholder: '例如：精液，射精（留空 = 主关键词命中就注入）', style: Object.assign({}, ta, { minHeight: '44px' }), onChange: e => patchEntrySoon(entry.index, { andKeywords: e.target.value.split(/[，,\n\r]+/).map(value => value.trim()).filter(Boolean) }, '附加条件', { andKeywords: e.target.value }) }),
+                    andKeywordValues(entry).length ? h('div', { style: { fontSize: '11px', color: '#8fb6d9', marginTop: '4px' } }, '已设 ' + andKeywordValues(entry).length + ' 个附加条件：命中主关键词但没有命中它们时，这条不会注入。') : null,
                   ) : null,
                   h('div', { style: { fontSize: '12px', margin: '10px 0 4px' } }, '适用生图渠道'),
                   h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '5px' } }, '未勾选任何渠道表示全部渠道。'),
