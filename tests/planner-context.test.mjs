@@ -9,19 +9,20 @@ const chars = { characters: [
 ] }
 
 test('activation defaults to resident and preserves ordinary ST keyword fields', () => {
-  assert.deepEqual(normalizeEntryActivation({}), { activation: 'always', keywords: [], backends: [] })
+  assert.deepEqual(normalizeEntryActivation({}), { activation: 'always', keywords: [], backends: [], andKeywords: [] })
   assert.deepEqual(normalizeEntryActivation({ key: ['Ann', '安'], constant: false, backend: 'comfyui' }), {
-    activation: 'keywords', keywords: ['Ann', '安'], backends: ['comfyui'],
+    activation: 'keywords', keywords: ['Ann', '安'], backends: ['comfyui'], andKeywords: [],
   })
   assert.equal(normalizeEntryActivation({ key: ['Ann'], constant: true }).activation, 'always')
   assert.equal(normalizeEntryActivation({ key: ['Ann'], use_regex: true }).activation, 'always')
   assert.equal(normalizeEntryActivation({ activation: 'always', keywords: ['Ann'] }).activation, 'always')
   assert.equal(normalizeEntryActivation({ activation: 'keywords', keywords: ['Ann'] }).activation, 'keywords')
   assert.equal(normalizeEntryActivation({ key: ['Ann'], keysecondary: [] }).activation, 'keywords')
-  assert.equal(normalizeEntryActivation({ key: ['Ann'], keysecondary: ['woman'] }).activation, 'always')
+  // PR #21：keysecondary 改为 AND 附加条件，主关键词命中后还要再命中附加组，因此是关键词条目
+  assert.equal(normalizeEntryActivation({ key: ['Ann'], keysecondary: ['woman'] }).activation, 'keywords')
   assert.equal(normalizeEntryActivation({ key: ['Ann'], selectiveLogic: 'and' }).activation, 'keywords')
   assert.equal(normalizeEntryActivation({ key: ['Ann'], selective: true, selectiveLogic: 'and' }).activation, 'always')
-  assert.deepEqual(normalizeEntryActivation(null), { activation: 'always', keywords: [], backends: [] })
+  assert.deepEqual(normalizeEntryActivation(null), { activation: 'always', keywords: [], backends: [], andKeywords: [] })
 })
 
 test('selection honors legacy, explicit keyword, disabled, and backend rules', () => {
