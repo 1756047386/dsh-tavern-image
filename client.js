@@ -3110,7 +3110,7 @@ function versionsOf(jobId) {
         function blankCharacter() {
           const traits = {}
           for (const key of ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"]) traits[key] = ''
-          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
+          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', formCues: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
             outfits: [{ id: 'o' + Date.now(), name: '常服', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true, default: true }] }
         }
         function addCharacter() {
@@ -3504,6 +3504,7 @@ function versionsOf(jobId) {
             h('details', { style: { marginTop: '4px' } }, h('summary', { style: { cursor: 'pointer', fontSize: '12px', color: '#9aa3b2' } }, '负面 / 状态'),
               grouped([["negative","负面","这张脸/身体不该出现的特征（进负向提示词）",2,true]]),
               area('状态与变化', '随剧情改，默认不注入', c.continuity, v => patch(i, { continuity: v }), 2),
+              area('形态线索', '同一角色有多个形态时（名字互为前缀，如「阿梅」与「阿梅（狐形）」）填在形态条目上，逗号分隔，如 fox ears, fox tail, 狐耳。画面写着这些时，规划写的基础名字会自动换成这个形态', c.formCues || '', v => patch(i, { formCues: v }), 1),
             ),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '12px', fontWeight: 600 } }, '服装库'),
             outfits.map((o, j) => h('div', { key: o.id || j, style: { borderTop: '1px solid #3a4150', marginTop: '8px', paddingTop: '6px' } },
