@@ -2877,17 +2877,33 @@ function versionsOf(jobId) {
               channel.hasApiKey ? h('button', { style: buttonStyle, onClick: () => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { clearApiKey: true, apiKey: '' }) })); markSecretEdited(channel.id) } }, '清除已保存 Key') : null) : null,
             backend === 'sdwebui' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: '8px' } },
               optionField('steps', '步数', '20', 'number'), optionField('cfg', 'CFG', '7', 'number'), optionField('sampler', '采样器', 'Euler a')) : null,
-            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '8px' } },
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: '10px 12px' } },
               selectOptionField('sampler', '采样器', NAI_SAMPLER_OPTIONS, 'k_euler_ancestral'),
               selectOptionField('noiseSchedule', '噪点表（Noise Schedule）', NAI_NOISE_OPTIONS, 'karras')) : null,
-            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(104px,1fr))', gap: '8px' } },
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(128px,1fr))', gap: '10px 12px' } },
               optionField('steps', '步数', '28', 'number'),
               optionField('cfg', 'CFG', '5', 'number'),
               h('div', { style: { marginBottom: '10px' } }, label('CFG Rescale'), h('input', { 'aria-label': 'CFG Rescale', type: 'number', step: '0.01', min: '0', max: '1', value: String((localFields.options || {}).cfgRescale ?? 0), placeholder: '0 ~ 1，0 = 关', style: full(), onChange: e => updateOption('cfgRescale', Number(e.target.value)) })),
               h('div', { style: { marginBottom: '10px' } }, label('Uncond Scale'), h('input', { 'aria-label': 'Uncond Scale', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).uncondScale ?? 0), placeholder: '0 = 不改动', style: full(), onChange: e => updateOption('uncondScale', Number(e.target.value)) })),
               h('div', { style: { marginBottom: '10px' } }, label('Skip CFG Sigma'), h('input', { 'aria-label': 'Skip CFG Above Sigma', type: 'number', step: '0.1', min: '0', value: String((localFields.options || {}).skipCfgAboveSigma ?? 0), placeholder: '0 = 不改动，常用 19', style: full(), onChange: e => updateOption('skipCfgAboveSigma', Number(e.target.value)) }))) : null,
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '10px 12px' } },
+              h('div', { style: { marginBottom: '10px' } }, label('官方负面预设（ucPreset）'),
+                h('select', { 'aria-label': '官方负面预设', value: String((localFields.options || {}).ucPreset ?? 3), style: full(), onChange: e => updateOption('ucPreset', Number(e.target.value)) },
+                  h('option', { value: '0', style: optStyle }, '0 · 强（Heavy）'),
+                  h('option', { value: '1', style: optStyle }, '1 · 弱（Light）'),
+                  h('option', { value: '2', style: optStyle }, '2 · Furry 侧重'),
+                  h('option', { value: '3', style: optStyle }, '3 · Human 侧重（默认）'),
+                  h('option', { value: '4', style: optStyle }, '4 · 不指定'))),
+              h('div', { style: { marginBottom: '10px' } }, label('官方质量词（qualityToggle）'),
+                h('select', { 'aria-label': '官方质量词', value: String((localFields.options || {}).qualityToggle ?? true), style: full(), onChange: e => updateOption('qualityToggle', e.target.value === 'true') },
+                  h('option', { value: 'true', style: optStyle }, '开（默认）'),
+                  h('option', { value: 'false', style: optStyle }, '关'))),
+              h('div', { style: { marginBottom: '10px' } }, label('多样性（variety_boost）'),
+                h('select', { 'aria-label': '多样性', value: String((localFields.options || {}).varietyBoost ?? false), style: full(), onChange: e => updateOption('varietyBoost', e.target.value === 'true') },
+                  h('option', { value: 'false', style: optStyle }, '关（默认）'),
+                  h('option', { value: 'true', style: optStyle }, '开（Variety Boost）')))) : null,
             backend === 'openai' ? optionField('quality', '质量', 'auto') : null,
-            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(104px,1fr))', gap: '8px' } },
+            backend === 'novelai' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '10px 12px' } },
               sizeField('sizeWidth', '宽（像素）', '如 832', legacySize.width),
               sizeField('sizeHeight', '高（像素）', '如 1216', legacySize.height),
               (sizeValue('sizeWidth', legacySize.width) && sizeValue('sizeHeight', legacySize.height)) ? null
@@ -4719,6 +4735,34 @@ function versionsOf(jobId) {
           lineHeight: '1.6', resize: 'vertical', boxSizing: 'border-box', fontSize: '12px',
         })
         const optStyle = { color: '#12161c', background: '#e9eef6' }
+        // 每套画风预设自己的生成参数（空 = 跟渠道设置）
+        const PRESET_SAMPLERS = [['k_euler_ancestral', 'Euler Ancestral'], ['k_euler', 'Euler'], ['k_dpmpp_2m', 'DPM++ 2M'], ['k_dpmpp_2s_ancestral', 'DPM++ 2S Anc'], ['k_dpmpp_sde', 'DPM++ SDE'], ['k_dpmpp_2m_sde', 'DPM++ 2M SDE'], ['ddim_v3', 'DDIM'], ['k_lms', 'LMS'], ['k_heun', 'Heun'], ['k_dpm_2', 'DPM2'], ['k_dpm_2_ancestral', 'DPM2 Anc']]
+        const PRESET_NOISE = [['karras', 'Karras'], ['native', 'Native'], ['exponential', 'Exponential'], ['polyexponential', 'Polyexponential']]
+        const PRESET_UC = [['0', '0 · 强（Heavy）'], ['1', '1 · 弱（Light）'], ['2', '2 · Furry'], ['3', '3 · Human（默认）'], ['4', '4 · 不指定']]
+        const paramValue = (p, key) => (p.params && p.params[key] !== undefined && p.params[key] !== null ? String(p.params[key]) : '')
+        const setParam = (i, p, key, value) => {
+          const next = Object.assign({}, p.params || {})
+          if (value === undefined) delete next[key]
+          else next[key] = value
+          patch(i, { params: next })
+        }
+        const PARAM_ROW = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '10px 12px' }
+        const paramGroupTitle = (text, first) => h('div', {
+          style: { fontSize: '11px', letterSpacing: '.02em', color: '#7f8a9c', margin: first ? '0 0 6px' : '12px 0 6px', paddingTop: first ? '0' : '10px', borderTop: first ? 'none' : '1px solid rgba(120,140,170,.14)' },
+        }, text)
+        const paramField = (caption, control) => h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px', minWidth: '0' } },
+          h('div', { style: { fontSize: '11px', color: '#9aa3b2' } }, caption), control)
+        const paramSelect = (i, p, key, caption, items) => paramField(caption,
+          h('select', { value: paramValue(p, key), title: caption + '：留空表示沿用渠道设置', style: Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box' }), onChange: e => setParam(i, p, key, e.target.value === '' ? undefined : e.target.value) },
+            h('option', { value: '', style: optStyle }, '跟随渠道'),
+            items.map(([value, text]) => h('option', { key: value, value, style: optStyle }, text))))
+        const paramNumber = (i, p, key, caption, step) => paramField(caption,
+          h('input', { type: 'number', step: step || '1', value: paramValue(p, key), placeholder: '跟随渠道', title: caption + '：留空表示沿用渠道设置', style: Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box' }), onChange: e => setParam(i, p, key, e.target.value.trim() === '' ? undefined : Number(e.target.value)) }))
+        const paramBool = (i, p, key, caption) => paramField(caption,
+          h('select', { value: paramValue(p, key), title: caption + '：跟随渠道表示沿用渠道设置', style: Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box' }), onChange: e => setParam(i, p, key, e.target.value === '' ? undefined : e.target.value === 'true') },
+            h('option', { value: '', style: optStyle }, '跟随渠道'),
+            h('option', { value: 'true', style: optStyle }, '开'),
+            h('option', { value: 'false', style: optStyle }, '关')))
 
         return h('div', { style: S.card },
           h('div', { style: { fontSize: '13px', marginBottom: '4px' } },
@@ -4768,6 +4812,28 @@ function versionsOf(jobId) {
                 style: ta('46px'),
                 onChange: e => patch(i, { negative: e.target.value }),
               }),
+              h('details', { style: { marginTop: '10px' } },
+                h('summary', { style: { fontSize: '11px', color: '#9aa3b2', cursor: 'pointer', padding: '2px 0' } }, '这套自己的生成参数（采样 / 步数 / CFG / NovelAI 高级…；留空 = 跟随渠道）'),
+                h('div', { style: { marginTop: '8px', padding: '12px 14px', borderRadius: '8px', background: '#151a22', border: '1px solid rgba(120,140,170,.18)' } },
+                  paramGroupTitle('采样', true),
+                  h('div', { style: PARAM_ROW },
+                    paramSelect(i, p, 'sampler', '采样器', PRESET_SAMPLERS),
+                    paramSelect(i, p, 'noiseSchedule', '噪点表', PRESET_NOISE)),
+                  paramGroupTitle('步数与 CFG'),
+                  h('div', { style: PARAM_ROW },
+                    paramNumber(i, p, 'steps', '步数', '1'),
+                    paramNumber(i, p, 'cfg', 'CFG', '0.1'),
+                    paramNumber(i, p, 'cfgRescale', 'CFG Rescale', '0.01')),
+                  paramGroupTitle('NovelAI 高级'),
+                  h('div', { style: PARAM_ROW },
+                    paramNumber(i, p, 'uncondScale', 'Uncond Scale', '0.1'),
+                    paramNumber(i, p, 'skipCfgAboveSigma', 'Skip CFG Sigma', '0.1')),
+                  paramGroupTitle('官方预设（NovelAI）'),
+                  h('div', { style: PARAM_ROW },
+                    paramSelect(i, p, 'ucPreset', '负面预设（ucPreset）', PRESET_UC),
+                    paramBool(i, p, 'qualityToggle', '质量词（qualityToggle）'),
+                    paramBool(i, p, 'varietyBoost', '多样性（variety_boost）'))),
+              ),
             )),
           ) : h('div', { style: { fontSize: '12px', color: '#9aa3b2', padding: '10px 0' } }, '还没有画风预设。点「➕ 新增一套」开始。'),
 
