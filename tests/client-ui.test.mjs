@@ -1174,3 +1174,19 @@ test('检查结果标记不支持时显示原因且不误报已是最新', async
   assert.doesNotMatch(ui.text(ui.render()), /当前已是最新版本/)
   assert.equal(ui.button('更新插件').props.disabled, true)
 })
+test('Release updater remains visible when Git support is false and shows live Tavern incompatibility', async () => {
+  const ui = harness({
+    'plugin-update': () => ({
+      ok: true, mode: 'release', supported: false,
+      compatibility: {
+        compatible: false, requiredApiVersion: 1, hostApiVersion: null,
+        reason: '此插件要求 Tavern 插件 API v1 或更新版本；当前宿主 API 未知。请先更新 Tavern，再更新插件。',
+      },
+    }),
+  })
+  await ui.openPluginUpdate()
+  const rendered = ui.text(ui.render())
+  assert.match(rendered, /Release 更新：下载官方发布包并校验 SHA-256/)
+  assert.match(rendered, /先更新 Tavern/)
+  assert.equal(ui.button('检查更新').props.disabled, true)
+})

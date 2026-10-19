@@ -1,0 +1,30 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+jobs:
+  test-package-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Run test suite
+        run: npm test
+      - name: Build and validate release assets
+        shell: pwsh
+        run: |
+          $assets = Join-Path $env:RUNNER_TEMP 'dsh-tavern-image-release'
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          $source = Join-Path $assets 'dsh-tavern-image-source.zip'
+          $install = Join-Path $assets 'dsh-tavern-image-install.zip'
+          ./scripts/Package-DshTavernImage.ps1 -OutputPath $install -SourceOutputPath $source
+          ./scripts/Finalize-DshTavernImage-Release.ps1 -Tag $env:GITHUB_REF_NAME -SourceZipPath $source -InstallZipPath $install -OutputDirectory $assets
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" "$env:RUNNER_TEMP\dsh-tavern-image-release\dsh-tavern-image-source.zip" "$env:RUNNER_TEMP\dsh-tavern-image-release\dsh-tavern-image-install.zip" "$env:RUNNER_TEMP\dsh-tavern-image-release\SHA256SUMS" --title "$env:GITHUB_REF_NAME" --generate-notes

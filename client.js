@@ -2473,7 +2473,7 @@ function versionsOf(jobId) {
         }
       }
       async function checkPluginUpdate() {
-        if (pluginUpdatePendingRef.current || pluginUpdateLocal?.supported !== true) return
+        if (pluginUpdatePendingRef.current || !(pluginUpdateLocal?.mode === 'release' || pluginUpdateLocal?.supported === true) || pluginUpdateLocal?.compatibility?.compatible === false) return
         pluginUpdatePendingRef.current = 'check'
         setPluginUpdatePending('check')
         setPluginUpdateNote('正在检查插件更新…')
@@ -2507,7 +2507,7 @@ function versionsOf(jobId) {
         }
       }
       async function applyPluginUpdate() {
-        if (pluginUpdatePendingRef.current || !pluginUpdateLocal?.supported || !pluginUpdateCheck?.available || !pluginUpdateCheck?.canUpdate || pluginUpdateCheck?.restartRequired || pluginUpdateLocal?.restartRequired) return
+        if (pluginUpdatePendingRef.current || (!(pluginUpdateLocal?.mode === 'release' || pluginUpdateLocal?.supported) ) || !pluginUpdateCheck?.available || !pluginUpdateCheck?.canUpdate || pluginUpdateCheck?.restartRequired || pluginUpdateLocal?.restartRequired) return
         if (libraryDirty.current) {
           setPluginUpdateNote('请先保存人物库，再更新插件。')
           return
@@ -3110,7 +3110,7 @@ function versionsOf(jobId) {
         function blankCharacter() {
           const traits = {}
           for (const key of ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"]) traits[key] = ''
-          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
+          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', formCues: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
             outfits: [{ id: 'o' + Date.now(), name: '常服', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true, default: true }] }
         }
         function addCharacter() {
@@ -3504,6 +3504,7 @@ function versionsOf(jobId) {
             h('details', { style: { marginTop: '4px' } }, h('summary', { style: { cursor: 'pointer', fontSize: '12px', color: '#9aa3b2' } }, '负面 / 状态'),
               grouped([["negative","负面","这张脸/身体不该出现的特征（进负向提示词）",2,true]]),
               area('状态与变化', '随剧情改，默认不注入', c.continuity, v => patch(i, { continuity: v }), 2),
+              area('形态线索', '同一角色有多个形态时（名字互为前缀，如「阿梅」与「阿梅（狐形）」）填在形态条目上，逗号分隔，如 fox ears, fox tail, 狐耳。画面写着这些时，规划写的基础名字会自动换成这个形态', c.formCues || '', v => patch(i, { formCues: v }), 1),
             ),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '12px', fontWeight: 600 } }, '服装库'),
             outfits.map((o, j) => h('div', { key: o.id || j, style: { borderTop: '1px solid #3a4150', marginTop: '8px', paddingTop: '6px' } },
@@ -4788,7 +4789,9 @@ function versionsOf(jobId) {
       }
 
       function pluginUpdateTab() {
-        const supported = pluginUpdateLocal?.supported === true
+        const releaseMode = pluginUpdateLocal?.mode === 'release'
+        const supported = releaseMode || pluginUpdateLocal?.supported === true
+        const canCheck = (releaseMode || pluginUpdateLocal?.supported === true) && pluginUpdateLocal?.compatibility?.compatible !== false
         const version = value => value ? String(value) : '暂无结果'
         const restartNeeded = pluginUpdateCheck?.restartRequired === true || pluginUpdateLocal?.restartRequired === true
         const canUpdate = supported && pluginUpdateCheck?.available === true && pluginUpdateCheck?.canUpdate === true && !restartNeeded
@@ -4844,6 +4847,8 @@ function versionsOf(jobId) {
         return h('div', null,
           h('div', { style: S.card },
             h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '8px' } }, '插件更新'),
+            h('div', { role: 'note', style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, releaseMode ? 'Release 更新：下载官方发布包并校验 SHA-256。' : 'Git 更新：仅对官方、干净的 master checkout 执行 fast-forward。'),
+            pluginUpdateLocal?.compatibility?.compatible === false ? h('div', { role: 'alert', style: { fontSize: '12px', color: '#f0b45c', marginBottom: '8px' } }, pluginUpdateLocal.compatibility.reason || '当前 Tavern 版本不兼容，请先更新 Tavern。') : null,
             h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(120px, auto) 1fr', gap: '6px 12px', fontSize: '13px' } },
               h('span', { style: S.label }, '当前版本'), h('span', null, version(pluginUpdateLocal?.currentVersion)),
               h('span', { style: S.label }, '远端版本'), h('span', null, version(pluginUpdateCheck?.latestVersion)),
@@ -4851,7 +4856,7 @@ function versionsOf(jobId) {
             latestConfirmed ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px' } }, '当前已是最新版本。') : null,
             pluginUpdateLocal?.supported === false && repositoryUrl ? h('a', { href: repositoryUrl.slice(0, -4), target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
             h('div', { style: S.row },
-              h('button', { style: buttonStyle, disabled: !supported || Boolean(pluginUpdatePending), onClick: () => { setPluginUpdateCheck(null); void checkPluginUpdate() } }, pluginUpdatePending === 'check' ? '正在检查…' : '检查更新'),
+              h('button', { style: buttonStyle, disabled: !canCheck || Boolean(pluginUpdatePending), onClick: () => { setPluginUpdateCheck(null); void checkPluginUpdate() } }, pluginUpdatePending === 'check' ? '正在检查…' : '检查更新'),
               h('button', { style: buttonStyle, disabled: !canUpdate || Boolean(pluginUpdatePending), onClick: applyPluginUpdate }, pluginUpdatePending === 'apply' ? '正在更新…' : '更新插件'),
               !pluginUpdateLocal && pluginUpdatePending !== 'local' ? h('button', { style: buttonStyle, disabled: Boolean(pluginUpdatePending), onClick: () => { pluginUpdateLocalAttempted.current = true; void loadPluginUpdateLocal() } }, '重试读取本地状态') : null,
             ),
@@ -4859,7 +4864,7 @@ function versionsOf(jobId) {
               pluginUpdateNote || (pluginUpdatePending === 'local' ? '读取本地插件状态…' : ''),
             ),
             migrationNeeded ? h('div', { role: 'note', style: { fontSize: '12px', color: '#f0b45c', marginTop: '8px', lineHeight: 1.55 } }, pluginUpdateLocal.directoryMigrationMessage) : null,
-            h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } }, '只更新插件代码；配置和人物库会保留。更新完成后请完整重启 DSH 才会生效。'),
+            h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } }, releaseMode ? 'Release 更新使用发布 metadata 中的版本和 SHA-256 校验；只更新插件代码，更新后请完整重启 DSH。' : 'Git 更新仅允许官方干净 master checkout 快进；只更新插件代码，更新后请完整重启 DSH。'),
             h('div', { style: { borderTop: '1px solid rgba(120,140,170,.2)', marginTop: '12px', paddingTop: '10px' } },
               h('div', { style: { fontSize: '12px', color: '#dfe4ec', marginBottom: '6px' } }, '手动下载插件包'),
               h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '9px', lineHeight: 1.55 } }, '本机安装包包含当前本机代码（包括未发布测试改动）；GitHub ZIP 与备用下载是公开仓库 master 版本，不包含本机测试改动。若公开 ZIP 下载较慢，可试备用下载；它也由 GitHub codeload 提供。历史发布可选稳定版本。'),
