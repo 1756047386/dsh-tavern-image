@@ -3029,15 +3029,24 @@ function versionsOf(jobId) {
         const picked = characters.filter(character => peoplePicked[character.id])
         const search = peopleSearch.trim().toLocaleLowerCase()
         const filteredCharacters = (search
-          ? characters.filter(character => [character.name, character.match].some(value => String(value || '').toLocaleLowerCase().includes(search)))
-          : characters).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'))
+          ? characters.filter(character => [character.name, character.match, character.group].some(value => String(value || '').toLocaleLowerCase().includes(search)))
+          : characters).slice().sort((a, b) => {
+            const ga = String(a.group || '').trim()
+            const gb = String(b.group || '').trim()
+            if (ga !== gb) {
+              if (!ga) return 1
+              if (!gb) return -1
+              return ga.localeCompare(gb, 'zh-CN')
+            }
+            return String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN')
+          })
         const activeCharacter = filteredCharacters.find(character => character.id === peopleActiveId) || filteredCharacters[0] || null
         const activeIndex = activeCharacter ? characters.findIndex(character => character.id === activeCharacter.id) : -1
         const batchFields = [
           ['feature', '角色特征'], ['face', '五官外貌'], ['faceBack', '五官外貌背面'],
           ['bodySFW', '上半身SFW'], ['bodySFWBack', '上半身SFW背面'], ['lowerSFW', '下半身SFW'], ['lowerSFWBack', '下半身SFW背面'],
           ['bodyNSFW', '上半身NSFW'], ['bodyNSFWBack', '上半身NSFW背面'], ['lowerNSFW', '下半身NSFW'], ['lowerNSFWBack', '下半身NSFW背面'],
-          ['negative', '负面'], ['match', '英文触发名'], ['continuity', '状态与变化'], ['note', '备注'], ['enabled', '启用状态'], ['cards', '绑定卡片'],
+          ['negative', '负面'], ['match', '英文触发名'], ['group', '分组'], ['continuity', '状态与变化'], ['note', '备注'], ['enabled', '启用状态'], ['cards', '绑定卡片'],
         ]
 
         function applyBatch() {
@@ -3050,7 +3059,7 @@ function versionsOf(jobId) {
             if (!selected.has(character.id)) return character
             if (peopleBatchField === 'enabled') return Object.assign({}, character, { enabled: peopleBatchValue !== 'false' })
             if (peopleBatchField === 'cards') return Object.assign({}, character, { cards: peopleBatchMode === 'append' ? [...new Set([...(character.cards || []), ...peopleBatchCards])] : peopleBatchCards.slice() })
-            const topLevel = ['match', 'continuity', 'note'].includes(peopleBatchField)
+            const topLevel = ['match', 'group', 'continuity', 'note'].includes(peopleBatchField)
             const previous = String((topLevel ? character[peopleBatchField] : character.traits?.[peopleBatchField]) || '')
             const value = peopleBatchMode === 'append' && previous.trim()
               ? previous + (['continuity', 'note'].includes(peopleBatchField) ? '\n' : ', ') + peopleBatchValue.trim()
@@ -3110,7 +3119,7 @@ function versionsOf(jobId) {
         function blankCharacter() {
           const traits = {}
           for (const key of ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"]) traits[key] = ''
-          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', formCues: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
+          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', group: '', formCues: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
             outfits: [{ id: 'o' + Date.now(), name: '常服', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true, default: true }] }
         }
         function addCharacter() {
@@ -3141,7 +3150,7 @@ function versionsOf(jobId) {
           if (!person) return
           const next = Object.assign({}, person, changes)
           const query = peopleSearch.trim().toLocaleLowerCase()
-          const stillMatches = [next.name, next.match].some(value => String(value || '').toLocaleLowerCase().includes(query))
+          const stillMatches = [next.name, next.match, next.group].some(value => String(value || '').toLocaleLowerCase().includes(query))
           setPeopleActiveId(person.id)
           if (query && !stillMatches) setPeopleSearch('')
           patch(index, changes)
@@ -3421,6 +3430,7 @@ function versionsOf(jobId) {
           }, style: { border: '1px solid #3a4150', borderRadius: '10px', padding: '10px 12px', margin: '8px 0' } },
             h('summary', { style: { cursor: 'pointer', fontSize: '13px', fontWeight: 600 } }, title),
             h('div', { style: S.row },
+              h('input', { type: 'text', placeholder: '分组（只影响排序）', title: '只用于人物库列表的分组排序和搜索，不参与关键词触发', value: c.group || '', style: Object.assign({}, S.input, { width: '130px' }), onChange: e => patchIdentity(i, { group: e.target.value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40) }) }),
               h('input', { type: 'text', placeholder: '角色名', value: c.name || '', style: Object.assign({}, S.input, { width: '140px' }), onChange: e => patchIdentity(i, { name: e.target.value }) }),
               h('input', { type: 'text', placeholder: '英文名（逗号分隔，用来触发）', value: c.match || '', style: Object.assign({}, S.input, { flex: 1, minWidth: '180px' }), onChange: e => patchIdentity(i, { match: e.target.value }) }),
               h('label', { style: S.row }, h('input', { type: 'checkbox', checked: c.enabled !== false, onChange: e => patch(i, { enabled: e.target.checked }) }), h('span', { style: { fontSize: '12px' } }, '启用')),
@@ -3546,7 +3556,7 @@ function versionsOf(jobId) {
           h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
             h('input', { type: 'search', 'aria-label': '搜索角色', value: peopleSearch, placeholder: '搜索中文名或英文触发名', style: Object.assign({}, S.input, { flex: '1 1 220px', minWidth: '180px' }), onChange: event => setPeopleSearch(event.target.value) }),
             h('select', { 'aria-label': '当前角色', value: activeCharacter?.id || '', style: Object.assign({}, S.input, { flex: '1 1 220px', minWidth: '180px' }), onChange: event => { setPeopleActiveId(event.target.value); setPeopleEditorOpen(true) } },
-              activeCharacter ? filteredCharacters.map(character => h('option', { key: character.id, value: character.id, style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, (character.name || '（未命名角色）') + (character.match ? ' · ' + character.match : ''))) : h('option', { value: '', style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, '没有匹配的角色'),
+              activeCharacter ? filteredCharacters.map(character => h('option', { key: character.id, value: character.id, style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, (character.group ? '[' + character.group + '] ' : '') + (character.name || '（未命名角色）') + (character.match ? ' · ' + character.match : ''))) : h('option', { value: '', style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, '没有匹配的角色'),
             ),
             h('button', { style: buttonStyle, onClick: () => setPeopleEditorOpen(open => !open) }, peopleEditorOpen ? '收起编辑' : '展开编辑'),
           ),
