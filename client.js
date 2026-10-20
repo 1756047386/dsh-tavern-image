@@ -2339,6 +2339,10 @@ function versionsOf(jobId) {
       const [galleryPicked, setGalleryPicked] = React.useState({})
       // 世界书：正在编辑的条目（-1 = 没在编辑）/ 导入面板 / 粘贴内容
       const [wbEditing, setWbEditing] = React.useState(-1)
+      // 世界书分两本（生图规则 / 角色与服装库），编辑必须落在选中的那一本上
+      const [wbBook, setWbBook] = React.useState('main')
+      // 条目默认折叠：只显示标题行，点标题展开只读预览，点「编辑」才进编辑态
+      const [wbOpen, setWbOpen] = React.useState({})
       const [wbImportOpen, setWbImportOpen] = React.useState(false)
       const [wbPaste, setWbPaste] = React.useState('')
       const [wbNote, setWbNote] = React.useState('')
@@ -3330,7 +3334,7 @@ function versionsOf(jobId) {
         /** 从当前会话的世界书导入成年角色 */
         async function importFromCard() {
           try {
-            setNote('正在读取世界书…')
+            setNote('正在读取这张卡里的角色…')
             const result = await post('/import-characters', { sessionId: String(lastSessionId || ''), card: importCard })
             if (result?.state) receiveState(result.state)
             const added = result?.added || []
@@ -3338,7 +3342,7 @@ function versionsOf(jobId) {
             const parts = []
             if (added.length) parts.push('新增 ' + added.join('、'))
             if (updated.length) parts.push('补全 ' + updated.join('、'))
-            const message = parts.length ? ('从世界书导入：' + parts.join('；')) : '世界书里没有可导入的新角色'
+            const message = parts.length ? ('从选定的卡导入：' + parts.join('；')) : '这张卡里没有可导入的角色'
             setNote(message)
             if (typeof showToast === 'function') showToast(message)
             return result
@@ -4253,7 +4257,13 @@ function versionsOf(jobId) {
 
       // ---- 世界书 ----
       function worldbookTab() {
-        const list = data.worldbook || []
+        // 两本世界书：生图规则（main）与角色与服装库（outfits），各自独立编辑
+        const books = Array.isArray(data.worldbookBooks) && data.worldbookBooks.length
+          ? data.worldbookBooks
+          : [{ key: 'main', name: String(data.worldbookName || '生图世界书'), count: (data.worldbook || []).length, entries: data.worldbook || [] }]
+        const activeBook = books.find(book => book.key === wbBook) || books[0]
+        const activeKey = activeBook?.key || 'main'
+        const list = Array.isArray(activeBook?.entries) ? activeBook.entries : (data.worldbook || [])
         const onCount = list.filter(e => e.enabled !== false).length
         const context = data.plannerContext || null
         const providers = [
@@ -4272,7 +4282,7 @@ function versionsOf(jobId) {
         }
         async function sendEntryPatch(index, patch, remove, tip) {
           return queueWbWrite(async () => {
-            const r = await post('/worldbook-entry', remove ? { index, remove: true } : { index, patch })
+            const r = await post('/worldbook-entry', remove ? { book: activeKey, index, remove: true } : { book: activeKey, index, patch })
             if (!r?.ok) { setWbNote((tip || '改') + '失败：' + (r?.error || '')); return false }
             setWbNote(tip ? (tip + '已保存') : '')
             await refreshWb()
@@ -4388,7 +4398,7 @@ function versionsOf(jobId) {
         }
         async function addEntry() {
           try {
-            const r = await post('/worldbook-add', { comment: '新条目', content: '' })
+            const r = await post('/worldbook-add', { book: activeKey, comment: '新条目', content: '' })
             if (!r?.ok) { setWbNote('加失败：' + (r?.error || '')); return }
             await refreshWb()
             setWbEditing(typeof r.index === 'number' ? r.index : -1)
@@ -4398,7 +4408,7 @@ function versionsOf(jobId) {
           try {
             let payload = text
             try { payload = JSON.parse(text) } catch { /* 当纯文本 */ }
-            const r = await post('/worldbook-import', { worldbook: payload })
+            const r = await post('/worldbook-import', { book: activeKey, worldbook: payload })
             if (!r?.ok) { setWbNote('导入失败：' + (r?.error || '没读出条目')); return }
             setWbNote('✓ 已导入《' + r.name + '》' + r.count + ' 条')
             setWbImportOpen(false)
@@ -4448,8 +4458,31 @@ function versionsOf(jobId) {
         const ta = Object.assign({}, S.input, { width: '100%', minHeight: '130px', fontFamily: 'inherit', lineHeight: '1.6', resize: 'vertical', boxSizing: 'border-box' })
 
         return h('div', { style: S.card },
-          h('div', { style: { fontSize: '13px', marginBottom: '4px' } },
-            '生图世界书' + (data.worldbookName ? '《' + data.worldbookName + '》' : '') + '（' + onCount + ' / ' + list.length + ' 条启用）'),
+          h('div', { style: { fontSize: '13px', marginBottom: '8px' } },
+            '世界书：' + (activeBook?.name ? '《' + activeBook.name + '》' : '') + '（' + onCount + ' / ' + list.length + ' 条启用）'),
+          // 书选择器：两本并列，切换后下方列表与所有编辑动作都作用在选中的那一本
+          h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' } },
+            books.map(book => {
+              const on = book.key === activeKey
+              return h('button', {
+                key: book.key,
+                title: book.file ? ('保存到 ' + book.file) : '',
+                style: Object.assign({}, buttonStyle, {
+                  fontSize: '12px',
+                  padding: '5px 12px',
+                  borderColor: on ? 'rgba(106,168,255,.85)' : 'rgba(120,140,170,.35)',
+                  background: on ? 'rgba(106,168,255,.18)' : 'transparent',
+                  color: on ? '#cfe2ff' : '#9aa3b2',
+                }),
+                onClick: () => {
+                  setWbBook(book.key)
+                  setWbEditing(-1)
+                  setWbOpen({})
+                  setWbNote('')
+                },
+              }, '📖 ' + (book.name || book.key) + '（' + (book.count ?? 0) + ' 条）')
+            }),
+          ),
           h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '10px' } },
             '启用的常驻条目会作为画图规则发送给规划模型；关键词条目仅在正文命中关键词时发送。旧条目默认常驻。可逐条调整触发方式和适用渠道。'),
           h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginBottom: '10px' } },
@@ -4491,10 +4524,31 @@ function versionsOf(jobId) {
                 }),
                 h('span', { style: { flex: 1, minWidth: 0, fontSize: '13px', color: entry.enabled === false ? '#9aa3b2' : '#dbe3ee', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                   String(entry.index + 1) + '. ' + (entry.comment || '未命名')),
-                h('span', { style: { fontSize: '11px', color: '#9aa3b2', flexShrink: 0 } }, entry.length + ' 字'),
+                h('span', { style: { fontSize: '11px', color: '#9aa3b2', flexShrink: 0 } },
+                  (entry.length ?? String(entry.content ?? '').length) + ' 字'),
+                h('button', {
+                  style: Object.assign({}, buttonStyle, { fontSize: '11px', padding: '2px 8px' }),
+                  title: '只读预览这条内容，不影响编辑',
+                  onClick: () => setWbOpen(current => ({ ...current, [entry.index]: !current[entry.index] })),
+                }, wbOpen[entry.index] ? '▾ 收起' : '▸ 内容'),
                 h('button', { style: Object.assign({}, buttonStyle, { fontSize: '12px', padding: '3px 10px' }), onClick: () => setWbEditing(wbEditing === entry.index ? -1 : entry.index) }, wbEditing === entry.index ? '收起' : '编辑'),
                 h('button', { style: Object.assign({}, buttonStyle, { fontSize: '12px', padding: '3px 10px', borderColor: 'rgba(242,104,107,.6)', color: '#f2686b' }), onClick: () => { if (confirm('删除这条世界书条目？')) patchEntry(entry.index, null, true) } }, '删'),
               ),
+              wbOpen[entry.index] && wbEditing !== entry.index ? h('div', {
+                style: {
+                  marginTop: '8px',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  background: '#141a22',
+                  color: '#c8d2df',
+                  fontSize: '12px',
+                  lineHeight: '1.75',
+                  whiteSpace: 'pre-wrap',
+                  maxHeight: '340px',
+                  overflow: 'auto',
+                  border: '1px solid rgba(120,140,170,.22)',
+                },
+              }, String(entry.content ?? '').trim() || '（这条还没有内容）') : null,
               wbEditing === entry.index ? h('div', { style: { marginTop: '8px' } },
                 h('input', {
                   type: 'text', value: wbDrafts[entry.index]?.comment ?? entry.comment ?? '', placeholder: '条目标题',
@@ -5151,7 +5205,18 @@ function versionsOf(jobId) {
         tab === 'worldbook' ? worldbookTab() : null,
         tab === 'plugin-update' ? pluginUpdateTab() : null,
         h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '14px' } }, '人物与服装修改后请点「保存人物库」。'),
-        wfGraphFile ? h(WorkflowGraphEditor, { file: wfGraphFile, post, onClose: () => setWfGraphFile(''), onSaved: () => { void openWorkflow(wfGraphFile, true) } }) : null,
+        // 注意：openWorkflow 定义在 workflow 标签页函数内部，这里跨作用域调用会 ReferenceError。
+        // 保存后只做本层能做的收尾：关掉编辑器、清掉旧详情，让用户重新点开时读到新数据。
+        wfGraphFile ? h(WorkflowGraphEditor, {
+          file: wfGraphFile,
+          post,
+          onClose: () => setWfGraphFile(''),
+          onSaved: () => {
+            setWfGraphFile('')
+            setWfDetail(null)
+            setWfNote('工作流已保存，重新点开即可看到新参数')
+          },
+        }) : null,
       )
     }
     // ─────────────────────────────────────────────────────────────

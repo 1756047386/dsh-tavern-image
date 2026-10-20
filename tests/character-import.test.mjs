@@ -24,10 +24,13 @@ const WORLD_BOOK = `
 </npc_亲属网络>
 `
 
-test('世界书 YAML 条目：只导入成年角色', () => {
+test('世界书 YAML 条目：成年与未成年都导入', () => {
   const chars = charactersFromWorldbookText(WORLD_BOOK)
-  assert.equal(chars.length, 1)
-  assert.equal(chars[0].name, '测试成年女性')
+  // 未满 18 的角色不再被丢弃：卡/世界书里写了什么年龄，就照实导入
+  assert.equal(chars.length, 2)
+  const names = chars.map(c => c.name)
+  assert.ok(names.includes('测试成年女性'), '成年的要导入')
+  assert.ok(chars.some(c => /13\s*岁/.test(c.traits.feature + c.traits.bodySFW + c.traits.face)), '未成年的也要导入且年龄保留')
 })
 
 test('世界书 YAML 条目：体积词改成比例词，剧情句剔除', () => {
@@ -39,10 +42,12 @@ test('世界书 YAML 条目：体积词改成比例词，剧情句剔除', () =>
   assert.match(char.traits.feature, /黑色长直发/)
 })
 
-test('世界书 YAML 条目：年龄整体下压', () => {
-  const [char] = charactersFromWorldbookText(WORLD_BOOK)
-  assert.match(char.traits.feature, /三十出头/)
-  assert.doesNotMatch(char.traits.feature, /40岁/)
+test('世界书 YAML 条目：年龄原样保留，不做整体下压', () => {
+  const chars = charactersFromWorldbookText(WORLD_BOOK)
+  const adult = chars.find(c => /40\s*岁/.test(c.traits.feature + c.traits.bodySFW))
+  assert.ok(adult, '40岁 必须原样保留')
+  assert.doesNotMatch(adult.traits.feature, /三十出头/,
+    '不再把 40 岁压成三十出头：使用者写多少就是多少')
 })
 
 test('模型返回：允许 ```json 围栏与前后解释', () => {
@@ -54,11 +59,15 @@ test('模型返回：允许 ```json 围栏与前后解释', () => {
   assert.equal(chars[0].outfits[0].upper, '针织衫')
 })
 
-test('模型返回：未成年角色被跳过', () => {
+test('模型返回：未成年角色照实导入，年龄保留', () => {
   const raw = '{"characters":[{"name":"未成年C","age":"15岁","feature":"长发"},{"name":"成年D","age":"26岁","feature":"短发"}]}'
   const chars = charactersFromExtraction(raw)
-  assert.equal(chars.length, 1)
-  assert.equal(chars[0].name, '成年D')
+  // 未成年的不再被丢弃
+  assert.equal(chars.length, 2)
+  const minor = chars.find(c => c.name === '未成年C')
+  assert.ok(minor, '未成年角色必须导入')
+  assert.match(minor.traits.feature, /15\s*岁/, '年龄原样保留')
+  assert.doesNotMatch(minor.traits.feature, /十八九岁/, '不再下压成成年')
 })
 
 test('模型返回：非法内容返回空数组而不抛错', () => {

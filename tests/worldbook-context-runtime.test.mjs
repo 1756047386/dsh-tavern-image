@@ -106,11 +106,11 @@ test('legacy rules remain always injected and plain-text worldbooks can still be
 
 test('backend planning uses one DSH model call per round and reports character counts without exposing prompts', async t => {
   const f = await fixture(t, [{ comment: 'Core', content: 'CORE_STABLE' }], { characters: [
-    { id: 'a', name: '韩月梅', traits: { face: 'blue eyes' } },
-    { id: 'b', name: '秦雨薇', traits: { face: 'green eyes' } },
+    { id: 'a', name: '角色甲', traits: { face: 'blue eyes' } },
+    { id: 'b', name: '角色乙', traits: { face: 'green eyes' } },
   ] })
-  await f.request('plan', { text: '韩月梅来到院子里。', messageId: 'one', count: 1, manual: true })
-  await f.request('plan', { text: '秦雨薇来到药铺里。', messageId: 'two', count: 3, manual: true })
+  await f.request('plan', { text: '角色甲来到院子里。', messageId: 'one', count: 1, manual: true })
+  await f.request('plan', { text: '角色乙来到药铺里。', messageId: 'two', count: 3, manual: true })
   assert.equal(f.calls.length, 2)
   const [one, two] = f.calls.map(call => call.system)
   const marker = '\n\n<本轮上下文>\n'
@@ -123,7 +123,7 @@ test('backend planning uses one DSH model call per round and reports character c
   const state = (await f.request('state', undefined, 'GET')).body
   assert.ok(state.plannerContext.staticChars > 0)
   assert.ok(state.plannerContext.dynamicChars > 0)
-  assert.equal(state.plannerContext.bodyChars, '秦雨薇来到药铺里。'.length)
+  assert.equal(state.plannerContext.bodyChars, '角色乙来到药铺里。'.length)
   assert.equal(state.plannerContext.includedCharacters.length, 1)
   assert.equal(JSON.stringify(state.plannerContext).includes('green eyes'), false)
 })
