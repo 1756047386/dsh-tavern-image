@@ -3342,7 +3342,8 @@ function versionsOf(jobId) {
             const parts = []
             if (added.length) parts.push('新增 ' + added.join('、'))
             if (updated.length) parts.push('补全 ' + updated.join('、'))
-            const message = parts.length ? ('从选定的卡导入：' + parts.join('；')) : '这张卡里没有可导入的角色'
+            const why = result?.llmError ? ('（' + String(result.llmError).slice(0, 140) + '）') : ''
+            const message = parts.length ? ('从选定的卡导入：' + parts.join('；')) : ('这张卡里没有可导入的角色' + why)
             setNote(message)
             if (typeof showToast === 'function') showToast(message)
             return result
