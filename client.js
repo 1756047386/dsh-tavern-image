@@ -35,7 +35,7 @@ const absoluteBase = (() => {
   try { if (location.origin) candidates.push(location.origin) } catch {}
   try { if (document.baseURI) candidates.push(new URL(document.baseURI).origin) } catch {}
   const origin = candidates.find(o => o && o !== 'null' && /^https?:/i.test(o))
-  return (origin || '') + '/api/dsh-tavern-image'
+  return (origin || '') + '/plugins/dsh-tavern-image'
 })()
 const BASE = absoluteBase
 
