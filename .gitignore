@@ -27,3 +27,6 @@ rollback-tavern.mjs
 worldbook.json
 *.bak-*
 *.bak
+
+# 使用者自己的第二本世界书（角色与服装库），种子是「世界书-角色与服装库.json」
+worldbook-outfits.json
